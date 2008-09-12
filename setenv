@@ -1,0 +1,2 @@
+export BBPATH=/home/denis/work/oe/ofb:/home/denis/work/oe/org.openembedded.dev-ofb
+export PATH=/home/denis/work/oe/bitbake/bin/:$PATH
