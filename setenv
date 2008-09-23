@@ -1,3 +1,3 @@
 export OEBASE=$HOME/oe
-export BBPATH=$OEBASE/ofb:$OEBASE/org.openembedded.dev-ofb
+export BBPATH=$OEBASE/ofb:$OEBASE/ofb-oe-dev
 export PATH=$OEBASE/bitbake/bin/:$PATH
