@@ -19,7 +19,7 @@ ANGSTROM_MODE ?= "glibc"
 PSTAGE_EXTRAPATH = "${ANGSTROM_MODE}"
 
 CACHE = "${TMPDIR}/cache/${ANGSTROM_MODE}/${MACHINE}"
-DEPLOY_DIR = "${OEBASE}/deploy/${ANGSTROM_MODE}"
+DEPLOY_DIR ?= "${TMPDIR}/deploy/${ANGSTROM_MODE}"
 require conf/distro/include/angstrom-${ANGSTROM_MODE}.inc
 
 #Use this variable in feeds and other parts that need a URI
