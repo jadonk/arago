@@ -27,11 +27,11 @@ do_stage() {
 		exit 1
 	fi
 	
-	install -d ${STAGING_DIR}/pkgdata/
-	install -d ${STAGING_DIR_TARGET}/shlibs/
+#	install -d ${STAGING_DIR}/pkgdata/
+#	install -d ${STAGING_DIR_TARGET}/shlibs/
 
-	cp -pPRr ${prefix}/pkgdata/* ${STAGING_DIR}/pkgdata/
-	cp -pPRr ${prefix}/${TARGET_SYS}/shlibs/* ${STAGING_DIR_TARGET}/shlibs/
+	cp -pPRr ${prefix}/pkgdata ${STAGING_DIR}/
+	cp -pPRr ${prefix}/${TARGET_SYS}/shlibs ${STAGING_DIR_TARGET}/
 
 	if [ -d ${prefix}/ipk ]; then
 		install -d ${DEPLOY_DIR_IPK}/
