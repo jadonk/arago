@@ -55,6 +55,13 @@ INHERIT += "testlab"
 ANGSTROM_PKG_FORMAT ?= "ipk"
 require conf/distro/include/angstrom-package-${ANGSTROM_PKG_FORMAT}.inc
 
+
+# We don't want to keep OABI compat
+ARM_KEEP_OABI = "0"
+# Do keep OABI compat for om-gta01 to keep the gllin binary working
+ARM_KEEP_OABI_pn-linux-openmoko_om-gta01 = "1"
+
+
 #Generate locales on the buildsystem instead of on the target. Speeds up first boot, set to "1" to enable
 PREFERRED_PROVIDER_qemu-native = "qemu-native"
 ENABLE_BINARY_LOCALE_GENERATION ?= "1"
@@ -79,6 +86,11 @@ TARGET_FPU_ppc405 ?= "soft"
 TARGET_FPU_armv6 ?= "hard"
 TARGET_FPU_armv7a ?= "hard"
 TARGET_FPU_ppc603e ?= "hard"
+
+# webkit-gtk and cairo have alignment issues with double instructions on armv5 so
+# disable them here
+TARGET_CC_ARCH_pn-webkit-gtk_armv5te = "-march=armv4t"
+TARGET_CC_ARCH_pn-cairo_armv5te = "-march=armv4t"
 
 #Set the right arch for the feeds
 #Alphabetically sorted
