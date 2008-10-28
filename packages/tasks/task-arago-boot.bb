@@ -1,5 +1,5 @@
 DESCRIPTION = "Basic task to get a device booting"
-PR = "r45"
+PR = "r0"
 
 inherit task
 
@@ -28,10 +28,16 @@ DISTRO_LOGIN_MANAGER ?= "tinylogin"
 MACHINE_ESSENTIAL_EXTRA_RDEPENDS ?= ""
 MACHINE_ESSENTIAL_EXTRA_RRECOMMENDS ?= ""
 
+# Make sure we build the kernel
+#DEPENDS = "virtual/kernel"
+
+DEPENDS = "alsa-lib tslib zlib ncurses libpng jpeg freetype mtd-utils thttpd"
+
 #
 # minimal set of packages - needed to boot
 #
-RDEPENDS_task-boot = "\
+#    kernel
+RDEPENDS_task-arago-boot = "\
     base-files \
     base-passwd \
     busybox \
@@ -46,6 +52,6 @@ RDEPENDS_task-boot = "\
     ${MACHINE_ESSENTIAL_EXTRA_RDEPENDS} \
     "
 
-RRECOMMENDS_task-boot = "\
+RRECOMMENDS_task-arago-boot = "\
     ${MACHINE_ESSENTIAL_EXTRA_RRECOMMENDS} \
     "
