@@ -8,7 +8,7 @@ DISTRO = "angstrom"
 DISTRO_NAME = "Angstrom"
 
 #TARGET_VENDOR = "-angstrom"
-TARGET_VENDOR = "-none"
+TARGET_VENDOR ?= "-none"
 
 # Add FEED_ARCH to overrides
 OVERRIDES .= ":${FEED_ARCH}"
