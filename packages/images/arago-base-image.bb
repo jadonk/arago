@@ -13,7 +13,7 @@ IMAGE_PREPROCESS_COMMAND = "create_etc_timestamp"
 # util-linux-mount util-linux-umount \
 
 IMAGE_INSTALL = "\
-    task-arago-boot \
+    task-arago-base \
     ${DISTRO_SSH_DAEMON} \
     angstrom-version \
     ${ARAGO_EXTRA_INSTALL} \
