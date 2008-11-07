@@ -1,3 +1,4 @@
-export OEBASE=$HOME/oe
-export BBPATH=$OEBASE/ofb:$OEBASE/ofb-oe-dev
+export OEBASE=$HOME
+export BBPATH=$OEBASE/arago:$OEBASE/arago-oe-dev
 export PATH=$OEBASE/bitbake/bin/:$PATH
+
