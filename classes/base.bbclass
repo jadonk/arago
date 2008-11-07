@@ -157,6 +157,23 @@ def base_both_contain(variable1, variable2, checkvalue, d):
 
 DEPENDS_prepend="${@base_dep_prepend(d)} "
 
+# Returns PN with various suffixes removed
+# or PN if no matching suffix was found.
+def base_package_name(d):
+  import bb;
+
+  pn = bb.data.getVar('PN', d, 1)
+  if pn.endswith("-native"):
+		pn = pn[0:-7]
+  elif pn.endswith("-cross"):
+		pn = pn[0:-6]
+  elif pn.endswith("-initial"):
+		pn = pn[0:-8]
+  elif pn.endswith("-intermediate"):
+		pn = pn[0:-13]
+
+  return pn
+
 def base_set_filespath(path, d):
 	import os, bb
 	filespath = []
@@ -167,7 +184,7 @@ def base_set_filespath(path, d):
 			filespath.append(os.path.join(p, o))
 	return ":".join(filespath)
 
-FILESPATH = "${@base_set_filespath([ "${FILE_DIRNAME}/${PF}", "${FILE_DIRNAME}/${P}", "${FILE_DIRNAME}/${PN}", "${FILE_DIRNAME}/files", "${FILE_DIRNAME}" ], d)}"
+FILESPATH = "${@base_set_filespath([ "${FILE_DIRNAME}/${PF}", "${FILE_DIRNAME}/${P}", "${FILE_DIRNAME}/${PN}", "${FILE_DIRNAME}/${BP}", "${FILE_DIRNAME}/${BPN}", "${FILE_DIRNAME}/files", "${FILE_DIRNAME}" ], d)}"
 
 def oe_filter(f, str, d):
 	from re import match
@@ -559,7 +576,10 @@ python base_do_fetch() {
 		try:
 			if type == "http" or type == "https" or type == "ftp" or type == "ftps":
 				if not base_chk_file(parser, pn, pv,uri, localpath, d):
-					bb.note("%s-%s: %s has no entry in conf/checksums.ini, not checking URI" % (pn,pv,uri))
+					if not bb.data.getVar("OE_ALLOW_INSECURE_DOWNLOADS",d, True):
+						bb.fatal("%s-%s: %s has no entry in conf/checksums.ini, not checking URI" % (pn,pv,uri))
+					else:
+						bb.note("%s-%s: %s has no entry in conf/checksums.ini, not checking URI" % (pn,pv,uri))
 		except Exception:
 			raise bb.build.FuncFailed("Checksum of '%s' failed" % uri)
 }
@@ -636,7 +656,7 @@ def oe_unpack_file(file, data, url = None):
 		cmd = 'gzip -dc %s > %s' % (file, efile)
 	elif file.endswith('.bz2'):
 		cmd = 'bzip2 -dc %s > %s' % (file, efile)
-	elif file.endswith('.zip'):
+	elif file.endswith('.zip') or file.endswith('.jar'):
 		cmd = 'unzip -q -o'
 		(type, host, path, user, pswd, parm) = bb.decodeurl(url)
 		if 'dos' in parm:
@@ -736,8 +756,48 @@ def base_get_metadata_svn_revision(d):
 		pass
 	return revision
 
-METADATA_BRANCH ?= "${@base_get_metadata_monotone_branch(d)}"
-METADATA_REVISION ?= "${@base_get_metadata_monotone_revision(d)}"
+def base_get_metadata_git_branch(d):
+	import os
+	branch = os.popen('cd %s; git-branch | grep "^* " | tr -d "* "' % base_get_scmbasepath(d)).read()
+
+	if len(branch) != 0:
+		return branch
+	return "<unknown>"
+
+def base_get_metadata_git_revision(d):
+	import os
+	rev = os.popen("cd %s; git-log -n 1 --pretty=oneline --" % base_get_scmbasepath(d)).read().split(" ")[0]
+	if len(rev) != 0:
+		return rev
+	return "<unknown>"
+
+def base_detect_revision(d):
+	scms = [base_get_metadata_monotone_revision, \
+			base_get_metadata_svn_revision, \
+			base_get_metadata_git_revision]
+
+	for scm in scms:
+		rev = scm(d)
+		if rev <> "<unknown>":
+			return rev
+
+	return "<unknown>"	
+
+def base_detect_branch(d):
+	scms = [base_get_metadata_monotone_branch, \
+			base_get_metadata_git_branch]
+
+	for scm in scms:
+		rev = scm(d)
+		if rev <> "<unknown>":
+			return rev.strip()
+
+	return "<unknown>"	
+	
+	
+
+METADATA_BRANCH ?= "${@base_detect_branch(d)}"
+METADATA_REVISION ?= "${@base_detect_revision(d)}"
 
 addhandler base_eventhandler
 python base_eventhandler() {
@@ -909,7 +969,7 @@ def get_subpkgedata_fn(pkg, d):
 	import bb, os
 	archs = bb.data.expand("${PACKAGE_ARCHS}", d).split(" ")
 	archs.reverse()
-	pkgdata = bb.data.expand('${STAGING_DIR}/pkgdata/', d)
+	pkgdata = bb.data.expand('${TMPDIR}/pkgdata/', d)
 	targetdir = bb.data.expand('${TARGET_VENDOR}-${TARGET_OS}/runtime/', d)
 	for arch in archs:
 		fn = pkgdata + arch + targetdir + pkg
