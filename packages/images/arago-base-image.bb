@@ -2,7 +2,16 @@
 # gives you a small images with basic media libraries
 
 ARAGO_EXTRA_INSTALL = "\
-    alsa-lib ncurses mtd-utils thttpd zlib tslib libpng jpeg freetype"
+    alsa-lib \
+    tslib \
+    zlib \
+    ncurses \
+    libpng \
+    jpeg \
+    freetype \
+    mtd-utils \
+    thttpd \
+    "
 
 # Disable this due to distribution restrictions
 # DISTRO_SSH_DAEMON ?= "dropbear"

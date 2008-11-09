@@ -1,5 +1,5 @@
 export OEBASE=$HOME
 export BBPATH=$OEBASE/arago:$OEBASE/arago-oe-dev
 export PATH=$OEBASE/bitbake/bin/:$PATH
-export BB_ENV_EXTRAWHITE="OEBASE http_proxy ftp_proxy"
-
+export BB_PRESERVE_ENV=1
+#export BB_ENV_EXTRAWHITE="OEBASE http_proxy ftp_proxy"
