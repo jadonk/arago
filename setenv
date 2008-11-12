@@ -1,4 +1,4 @@
-export OEBASE=$HOME/work/oe
+export OEBASE=$HOME/oe
 export BBPATH=$OEBASE/arago:$OEBASE/arago-oe-dev
 export PATH=$OEBASE/bitbake/bin/:$PATH
 export BB_PRESERVE_ENV=1
