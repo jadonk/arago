@@ -1,0 +1,42 @@
+diff --git a/common/env_common.c b/common/env_common.c
+index 6be3bb0..edb7d74 100644
+--- a/common/env_common.c
++++ b/common/env_common.c
+@@ -263,6 +263,10 @@ void env_relocate (void)
+ 	else {
+ 		env_relocate_spec ();
+ 	}
++#ifdef CONFIG_OVERRIDE_BOOTENV
++	puts ("Using default environment\n\n");
++	set_default_env();
++#endif
+ 	gd->env_addr = (ulong)&(env_ptr->data);
+ 
+ #ifdef CONFIG_AMIGAONEG3SE
+diff --git a/include/configs/omap3_beagle.h b/include/configs/omap3_beagle.h
+index 7e93770..2d03c63 100644
+--- a/include/configs/omap3_beagle.h
++++ b/include/configs/omap3_beagle.h
+@@ -150,11 +150,17 @@
+ #define CONFIG_JFFS2_PART_SIZE 	0xf980000	/* size of jffs2 partition */
+ 
+ /* Environment information */
+-#define CONFIG_BOOTDELAY         10
+-
+-#define CONFIG_BOOTCOMMAND "nand read 80200000 280000 400000 ; bootm 80200000"
+-
+-#define CONFIG_BOOTARGS "setenv bootargs console=ttyS2,115200n8 noinitrd root=/dev/mtdblock4 rw rootfstype=jffs2"
++#define CONFIG_BOOTDELAY         1
++
++/* Ignores BOOTCMD in saved environment and runs u-boot.cmd from SD card */
++#define CONFIG_CMD_AUTOSCRIPT
++#define CONFIG_OVERRIDE_BOOTENV
++#define CONFIG_BOOTCOMMAND "\
++mmcinit;\
++fatload mmc 0 801F0000 u-boot.img;\
++autoscr 801F0000"
++ 
++#define CONFIG_BOOTARGS "console=ttyS2,115200n8 console=tty0 root=/dev/mtdblock4 rw rootfstype=jffs2 nohz=off"
+ 
+ #define CONFIG_NETMASK           255.255.254.0
+ #define CONFIG_BOOTFILE          "uImage"
