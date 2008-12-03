@@ -1,5 +1,5 @@
 DESCRIPTION = "Basic task to get a device booting"
-PR = "r1"
+PR = "r2"
 
 inherit task
 
@@ -26,6 +26,9 @@ DEPENDS = "\
     freetype \
     mtd-utils \
     thttpd \
+    gdbserver \
+    opkg-nogpg \
+    cppstub \
     "
 
 # minimal set of packages - needed to boot
