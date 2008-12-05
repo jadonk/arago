@@ -1,0 +1,24 @@
+From 149a78f39ba0f1e9d719680d5ed830c9e74d363d Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Tue, 23 Sep 2008 14:09:01 +0530
+Subject: [PATCH 22/24] OMAP35x : Fix USB gadget driver registration failure.
+
+---
+ drivers/usb/musb/musb_gadget.c |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/usb/musb/musb_gadget.c b/drivers/usb/musb/musb_gadget.c
+index b3773f1..9b31268 100644
+--- a/drivers/usb/musb/musb_gadget.c
++++ b/drivers/usb/musb/musb_gadget.c
+@@ -1638,6 +1638,7 @@ int __init musb_gadget_setup(struct musb *musb)
+ 	musb->g.dev.dma_mask = musb->controller->dma_mask;
+ 	musb->g.dev.release = musb_gadget_release;
+ 	musb->g.name = musb_driver_name;
++	musb->gadget_driver = NULL;
+ 
+ 	if (is_otg_enabled(musb))
+ 		musb->g.is_otg = 1;
+-- 
+1.5.6
+

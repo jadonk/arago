@@ -1,0 +1,411 @@
+From e4d65b2befedc576ae1c95bb4f21e70ddc948bc8 Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Thu, 4 Sep 2008 23:16:36 +0530
+Subject: [PATCH 05/24] OMAP35X : Add OMAP35x configuration.
+
+Enables OMAP35x Configuration. Also includes PM fixes.
+---
+ arch/arm/configs/omap3_evm_defconfig |   22 ++++++++-
+ arch/arm/mach-omap2/Kconfig          |   50 ++++++++++++++++++++++-
+ arch/arm/mach-omap2/usb-musb.c       |    2 -
+ arch/arm/plat-omap/common.c          |   76 ++++++++++++++++++++++++++++++++++
+ include/asm-arm/arch-omap/common.h   |    4 ++
+ include/asm-arm/arch-omap/cpu.h      |   62 +++++++++++++++++++++++++++
+ 6 files changed, 210 insertions(+), 6 deletions(-)
+
+diff --git a/arch/arm/configs/omap3_evm_defconfig b/arch/arm/configs/omap3_evm_defconfig
+index 22d0c32..44ea920 100644
+--- a/arch/arm/configs/omap3_evm_defconfig
++++ b/arch/arm/configs/omap3_evm_defconfig
+@@ -189,8 +189,15 @@ CONFIG_OMAP_DM_TIMER=y
+ CONFIG_OMAP_LL_DEBUG_UART1=y
+ # CONFIG_OMAP_LL_DEBUG_UART2 is not set
+ # CONFIG_OMAP_LL_DEBUG_UART3 is not set
++# CONFIG_OMAP_PM_NONE is not set
++CONFIG_OMAP_PM_NOOP=y
+ CONFIG_ARCH_OMAP34XX=y
+ CONFIG_ARCH_OMAP3430=y
++CONFIG_ARCH_OMAP35XX=y
+++CONFIG_ARCH_OMAP3503=y
++# CONFIG_ARCH_OMAP3515 is not set
++# CONFIG_ARCH_OMAP3525 is not set
++# CONFIG_ARCH_OMAP3530 is not set
+ 
+ #
+ # OMAP Board Type
+@@ -283,6 +290,13 @@ CONFIG_CMDLINE="root=/dev/nfs nfsroot=192.168.0.1:/home/user/buildroot ip=192.16
+ # CONFIG_KEXEC is not set
+ 
+ #
++# CPUIdle
++#
++CONFIG_CPU_IDLE=y
++CONFIG_CPU_IDLE_GOV_LADDER=y
++CONFIG_CPU_IDLE_GOV_MENU=y
++
++#
+ # CPU Frequency scaling
+ #
+ # CONFIG_CPU_FREQ is not set
+@@ -299,7 +313,7 @@ CONFIG_FPE_NWFPE=y
+ # CONFIG_FPE_FASTFPE is not set
+ CONFIG_VFP=y
+ CONFIG_VFPv3=y
+-# CONFIG_NEON is not set
++CONFIG_NEON=y
+ 
+ #
+ # Userspace binary formats
+@@ -313,7 +327,9 @@ CONFIG_BINFMT_MISC=y
+ #
+ CONFIG_PM=y
+ # CONFIG_PM_DEBUG is not set
+-# CONFIG_SUSPEND is not set
++CONFIG_PM_SLEEP=y
++CONFIG_SUSPEND=y
++CONFIG_SUSPEND_FREEZER=y
+ # CONFIG_APM_EMULATION is not set
+ CONFIG_ARCH_SUSPEND_POSSIBLE=y
+ 
+@@ -891,7 +907,7 @@ CONFIG_FB_OMAP_CONSISTENT_DMA_SIZE=2
+ # CONFIG_VGA_CONSOLE is not set
+ CONFIG_DUMMY_CONSOLE=y
+ # CONFIG_FRAMEBUFFER_CONSOLE is not set
+-# CONFIG_LOGO is not set
++CONFIG_LOGO=y
+ 
+ #
+ # Sound
+diff --git a/arch/arm/mach-omap2/Kconfig b/arch/arm/mach-omap2/Kconfig
+index 365b982..73e0726 100644
+--- a/arch/arm/mach-omap2/Kconfig
++++ b/arch/arm/mach-omap2/Kconfig
+@@ -25,6 +25,54 @@ config ARCH_OMAP3430
+ 	depends on ARCH_OMAP3 && ARCH_OMAP34XX
+ 	select ARCH_OMAP_OTG
+ 
++config ARCH_OMAP35XX
++	bool "OMAP35x Family"
++	select ARCH_OMAP3
++	select ARCH_OMAP34XX
++	select ARCH_OMAP3430
++	select OMAP3430_ES2
++	select NEON
++	help
++	  OMAP35x family of processors based on ARM Cortex-A8
++	  in combination with IVA2.2 core and OpenGL ES2.0
++	  compatible graphics engine.
++
++	  ARM Cortex-A8 contains NEON SIMD coprocessor.
++
++choice
++	prompt "Current choice"
++	default ARCH_OMAP3503
++
++config ARCH_OMAP3503
++	bool "OMAP3503"
++	depends on ARCH_OMAP35XX
++	help
++	  Contains ARM Cortex-A8 processor.
++
++config ARCH_OMAP3515
++	bool "OMAP3515"
++	depends on ARCH_OMAP35XX
++	help
++	   Contains ARM Cortex-A8 processor and SGX530 subsystem
++	   for 2D and 3D graphics acceleration.
++
++config ARCH_OMAP3525
++	bool "OMAP3525"
++	depends on ARCH_OMAP35XX
++	help
++	  Contains ARM Cortex-A8 processor and IVA2.2 subsystem
++	  with a C64x+ DSP core.
++
++config ARCH_OMAP3530
++	bool "OMAP3530"
++	depends on ARCH_OMAP35XX
++	help
++	   Contains ARM Cortex-A8 processor, IVA2.2 subsystem
++	   with a C64x+ DSP Core and SGX530 subsystem for 2D
++	   and 3D graphics acceleration.
++
++endchoice
++
+ comment "OMAP Board Type"
+ 	depends on ARCH_OMAP2 || ARCH_OMAP3
+ 
+@@ -117,7 +165,7 @@ config MACH_OMAP_3430SDP
+ 
+ config MACH_OMAP3EVM
+ 	bool "OMAP 3530 EVM board"
+-	depends on ARCH_OMAP3 && ARCH_OMAP34XX
++	depends on ARCH_OMAP35XX
+ 
+ config MACH_OMAP3_BEAGLE
+ 	bool "OMAP3 BEAGLE board"
+diff --git a/arch/arm/mach-omap2/usb-musb.c b/arch/arm/mach-omap2/usb-musb.c
+index 842edb3..933f7c1 100644
+--- a/arch/arm/mach-omap2/usb-musb.c
++++ b/arch/arm/mach-omap2/usb-musb.c
+@@ -58,7 +58,6 @@ static int musb_set_clock(struct clk *clk, int state)
+ 		if (clk_on > 0)
+ 			return -ENODEV;
+ 
+-		omap2_block_sleep();
+ 		clk_enable(clk);
+ 		clk_on = 1;
+ 	} else {
+@@ -67,7 +66,6 @@ static int musb_set_clock(struct clk *clk, int state)
+ 
+ 		clk_disable(clk);
+ 		clk_on = 0;
+-		omap2_allow_sleep();
+ 	}
+ 
+ 	return 0;
+diff --git a/arch/arm/plat-omap/common.c b/arch/arm/plat-omap/common.c
+index 3a5f05e..f8b04cc 100644
+--- a/arch/arm/plat-omap/common.c
++++ b/arch/arm/plat-omap/common.c
+@@ -334,3 +334,79 @@ void __init omap2_set_globals_343x(void)
+ }
+ #endif
+ 
++#if defined(CONFIG_ARCH_OMAP3503)
++
++static struct omap_globals omap3503_globals = {
++	.class	= OMAP35XX_CLASS,
++	.tap	= (__force void __iomem *)OMAP2_IO_ADDRESS(0x4830A000),
++	.sdrc	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP343X_SDRC_BASE),
++	.sms	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP343X_SMS_BASE),
++	.ctrl	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP343X_CTRL_BASE),
++	.prm	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP3430_PRM_BASE),
++	.cm	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP3430_CM_BASE),
++};
++
++void __init omap2_set_globals_3503(void)
++{
++	omap2_globals = &omap3503_globals;
++	__omap2_set_globals();
++}
++#endif
++
++#if defined(CONFIG_ARCH_OMAP3515)
++
++static struct omap_globals omap3515_globals = {
++	.class	= OMAP35XX_CLASS,
++	.tap	= (__force void __iomem *)OMAP2_IO_ADDRESS(0x4830A000),
++	.sdrc	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP343X_SDRC_BASE),
++	.sms	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP343X_SMS_BASE),
++	.ctrl	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP343X_CTRL_BASE),
++	.prm	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP3430_PRM_BASE),
++	.cm	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP3430_CM_BASE),
++};
++
++void __init omap2_set_globals_3515(void)
++{
++	omap2_globals = &omap3515_globals;
++	__omap2_set_globals();
++}
++#endif
++
++#if defined(CONFIG_ARCH_OMAP3525)
++
++static struct omap_globals omap3525_globals = {
++	.class	= OMAP35XX_CLASS,
++	.tap	= (__force void __iomem *)OMAP2_IO_ADDRESS(0x4830A000),
++	.sdrc	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP343X_SDRC_BASE),
++	.sms	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP343X_SMS_BASE),
++	.ctrl	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP343X_CTRL_BASE),
++	.prm	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP3430_PRM_BASE),
++	.cm	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP3430_CM_BASE),
++};
++
++void __init omap2_set_globals_3525(void)
++{
++	omap2_globals = &omap3525_globals;
++	__omap2_set_globals();
++}
++#endif
++
++#if defined(CONFIG_ARCH_OMAP3530)
++
++static struct omap_globals omap3530_globals = {
++	.class	= OMAP35XX_CLASS,
++	.tap	= (__force void __iomem *)OMAP2_IO_ADDRESS(0x4830A000),
++	.sdrc	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP343X_SDRC_BASE),
++	.sms	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP343X_SMS_BASE),
++	.ctrl	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP343X_CTRL_BASE),
++	.prm	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP3430_PRM_BASE),
++	.cm	= (__force void __iomem *)OMAP2_IO_ADDRESS(OMAP3430_CM_BASE),
++};
++
++void __init omap2_set_globals_3530(void)
++{
++	omap2_globals = &omap3530_globals;
++	__omap2_set_globals();
++}
++#endif
++
+diff --git a/include/asm-arm/arch-omap/common.h b/include/asm-arm/arch-omap/common.h
+index cd5d3ea..e24edee 100644
+--- a/include/asm-arm/arch-omap/common.h
++++ b/include/asm-arm/arch-omap/common.h
+@@ -65,6 +65,10 @@ struct omap_globals {
+ void omap2_set_globals_242x(void);
+ void omap2_set_globals_243x(void);
+ void omap2_set_globals_343x(void);
++void omap2_set_globals_3503(void);
++void omap2_set_globals_3515(void);
++void omap2_set_globals_3525(void);
++void omap2_set_globals_3535(void);
+ 
+ /* These get called from omap2_set_globals_xxxx(), do not call these */
+ void omap2_set_globals_tap(struct omap_globals *);
+diff --git a/include/asm-arm/arch-omap/cpu.h b/include/asm-arm/arch-omap/cpu.h
+index 33f26e9..f490743 100644
+--- a/include/asm-arm/arch-omap/cpu.h
++++ b/include/asm-arm/arch-omap/cpu.h
+@@ -9,6 +9,7 @@
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License as published by
++#  undef  OMAP_NAME
+  * the Free Software Foundation; either version 2 of the License, or
+  * (at your option) any later version.
+  *
+@@ -97,6 +98,26 @@ extern unsigned int system_rev;
+ # endif
+ #endif
+ 
++#ifdef CONFIG_ARCH_OMAP35XX
++# undef OMAP_NAME
++# ifdef CONFIG_ARCH_OMAP3503
++#  define OMAP_NAME omap3503
++# endif
++
++# ifdef CONFIG_ARCH_OMAP3515
++#  define OMAP_NAME omap3515
++# endif
++
++# ifdef CONFIG_ARCH_OMAP3525
++#   define OMAP_NAME omap3525
++# endif
++
++# ifdef CONFIG_ARCH_OMAP3530
++#  define OMAP_NAME omap3530
++# endif
++
++#endif  /* ifdef CONFIG_ARCH_OMAP35XX */
++
+ /*
+  * Macros to group OMAP into cpu classes.
+  * These can be used in most places.
+@@ -107,6 +128,7 @@ extern unsigned int system_rev;
+  * cpu_is_omap242x():	True for OMAP2420, OMAP2422, OMAP2423
+  * cpu_is_omap243x():	True for OMAP2430
+  * cpu_is_omap343x():	True for OMAP3430
++ * cpu_is_omap35x():	True for OMAP35x
+  */
+ #define GET_OMAP_CLASS	((system_rev >> 24) & 0xff)
+ 
+@@ -129,6 +151,7 @@ IS_OMAP_CLASS(15xx, 0x15)
+ IS_OMAP_CLASS(16xx, 0x16)
+ IS_OMAP_CLASS(24xx, 0x24)
+ IS_OMAP_CLASS(34xx, 0x34)
++IS_OMAP_CLASS(35xx, 0x34)
+ 
+ IS_OMAP_SUBCLASS(242x, 0x242)
+ IS_OMAP_SUBCLASS(243x, 0x243)
+@@ -142,6 +165,7 @@ IS_OMAP_SUBCLASS(343x, 0x343)
+ #define cpu_is_omap243x()		0
+ #define cpu_is_omap34xx()		0
+ #define cpu_is_omap343x()		0
++#define cpu_is_omap35xx()		0
+ 
+ #if defined(MULTI_OMAP1)
+ # if defined(CONFIG_ARCH_OMAP730)
+@@ -186,6 +210,10 @@ IS_OMAP_SUBCLASS(343x, 0x343)
+ #  define cpu_is_omap34xx()		is_omap34xx()
+ #  define cpu_is_omap343x()		is_omap343x()
+ # endif
++# if defined(CONFIG_ARCH_OMAP35XX)
++#  undef  cpu_is_omap35xx
++#  define cpu_is_omap35xx()		is_omap35xx()
++# endif
+ #else
+ # if defined(CONFIG_ARCH_OMAP24XX)
+ #  undef  cpu_is_omap24xx
+@@ -225,6 +253,10 @@ IS_OMAP_SUBCLASS(343x, 0x343)
+  * cpu_is_omap2423():	True for OMAP2423
+  * cpu_is_omap2430():	True for OMAP2430
+  * cpu_is_omap3430():	True for OMAP3430
++ * cpu_is_omap3503():	True for OMAP3503
++ * cpu_is_omap3515():	True for OMAP3515
++ * cpu_is_omap3525():	True for OMAP3525
++ * cpu_is_omap3530():	True for OMAP3530
+  */
+ #define GET_OMAP_TYPE	((system_rev >> 16) & 0xffff)
+ 
+@@ -247,6 +279,10 @@ IS_OMAP_TYPE(2422, 0x2422)
+ IS_OMAP_TYPE(2423, 0x2423)
+ IS_OMAP_TYPE(2430, 0x2430)
+ IS_OMAP_TYPE(3430, 0x3430)
++IS_OMAP_TYPE(3503, 0x3430)
++IS_OMAP_TYPE(3515, 0x3430)
++IS_OMAP_TYPE(3525, 0x3430)
++IS_OMAP_TYPE(3530, 0x3430)
+ 
+ #define cpu_is_omap310()		0
+ #define cpu_is_omap730()		0
+@@ -261,6 +297,10 @@ IS_OMAP_TYPE(3430, 0x3430)
+ #define cpu_is_omap2423()		0
+ #define cpu_is_omap2430()		0
+ #define cpu_is_omap3430()		0
++#define cpu_is_omap3503()		0
++#define cpu_is_omap3515()		0
++#define cpu_is_omap3525()		0
++#define cpu_is_omap3530()		0
+ 
+ #if defined(MULTI_OMAP1)
+ # if defined(CONFIG_ARCH_OMAP730)
+@@ -314,6 +354,26 @@ IS_OMAP_TYPE(3430, 0x3430)
+ # define cpu_is_omap3430()		is_omap3430()
+ #endif
+ 
++#if defined(CONFIG_ARCH_OMAP35XX)
++# undef cpu_is_omap3503
++# undef cpu_is_omap3515
++# undef cpu_is_omap3525
++# undef cpu_is_omap3530
++
++# if defined(CONFIG_ARCH_OMAP3503)
++#  define cpu_is_omap3503()		1
++# endif
++# if defined(CONFIG_ARCH_OMAP3515)
++#  define cpu_is_omap3515()		1
++# endif
++# if defined(CONFIG_ARCH_OMAP3525)
++#  define cpu_is_omap3525()		1
++# endif
++# if defined(CONFIG_ARCH_OMAP3525)
++#  define cpu_is_omap3530()		1
++# endif
++#endif	/* if defined(CONFIG_ARCH_OMAP35XX) */
++
+ /* Macros to detect if we have OMAP1 or OMAP2 */
+ #define cpu_class_is_omap1()	(cpu_is_omap730() || cpu_is_omap15xx() || \
+ 				cpu_is_omap16xx())
+@@ -359,6 +419,8 @@ IS_OMAP_TYPE(3430, 0x3430)
+ #define OMAP3430_REV_ES2_1	0x34302000
+ #define OMAP3430_REV_ES2_2	0x34303000
+ 
++#define OMAP35XX_CLASS		0x34300000
++
+ /*
+  * omap_chip bits
+  *
+-- 
+1.5.6
+

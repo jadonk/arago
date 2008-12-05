@@ -1,0 +1,2348 @@
+From dcd288c943810d08bee99e8e21fa6bd7bb5ccd76 Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Thu, 4 Sep 2008 22:17:49 +0530
+Subject: [PATCH 01/24] OMAP35x USB : USB patches on the 2.6.26 baseline
+
+USB Bug fixes on the 2.6.26-omap2 baseline.
+---
+ arch/arm/mach-omap2/board-n800-usb.c |   46 +++++++-
+ arch/arm/mach-omap2/usb-musb.c       |   51 +++++++-
+ arch/arm/mach-omap2/usb-tusb6010.c   |    1 -
+ drivers/usb/musb/musb_core.c         |   57 ++++-----
+ drivers/usb/musb/musb_core.h         |   14 +--
+ drivers/usb/musb/musb_host.c         |  236 ++++++++++++++++++++++++----------
+ drivers/usb/musb/omap2430.c          |    2 +
+ drivers/usb/musb/tusb6010.h          |  169 ------------------------
+ drivers/usb/storage/datafab.c        |    2 -
+ drivers/usb/storage/debug.c          |    2 -
+ drivers/usb/storage/debug.h          |    2 -
+ drivers/usb/storage/dpcm.c           |    2 -
+ drivers/usb/storage/dpcm.h           |    2 -
+ drivers/usb/storage/freecom.c        |    4 -
+ drivers/usb/storage/freecom.h        |    2 -
+ drivers/usb/storage/initializers.c   |    2 -
+ drivers/usb/storage/initializers.h   |    2 -
+ drivers/usb/storage/isd200.c         |    8 +-
+ drivers/usb/storage/jumpshot.c       |    2 -
+ drivers/usb/storage/protocol.c       |    2 -
+ drivers/usb/storage/protocol.h       |    2 -
+ drivers/usb/storage/scsiglue.c       |   53 ++++----
+ drivers/usb/storage/scsiglue.h       |    2 -
+ drivers/usb/storage/sddr09.c         |    1 -
+ drivers/usb/storage/sddr09.h         |    2 -
+ drivers/usb/storage/sddr55.c         |    2 -
+ drivers/usb/storage/sddr55.h         |    2 -
+ drivers/usb/storage/shuttle_usbat.c  |    2 -
+ drivers/usb/storage/shuttle_usbat.h  |    2 -
+ drivers/usb/storage/transport.c      |   83 ++++++------
+ drivers/usb/storage/transport.h      |    2 -
+ drivers/usb/storage/unusual_devs.h   |   13 ++-
+ drivers/usb/storage/usb.c            |  111 ++++++++---------
+ drivers/usb/storage/usb.h            |   25 ++--
+ include/asm-arm/arch-omap/hdrc_cnf.h |  177 -------------------------
+ include/linux/usb.h                  |    1 +
+ include/linux/usb/musb.h             |   38 +++++-
+ 37 files changed, 470 insertions(+), 656 deletions(-)
+ delete mode 100644 include/asm-arm/arch-omap/hdrc_cnf.h
+
+diff --git a/arch/arm/mach-omap2/board-n800-usb.c b/arch/arm/mach-omap2/board-n800-usb.c
+index 7599f64..16ea8fc 100644
+--- a/arch/arm/mach-omap2/board-n800-usb.c
++++ b/arch/arm/mach-omap2/board-n800-usb.c
+@@ -35,14 +35,58 @@ static int tusb_set_clock(struct clk *osc_ck, int state);
+ #	define BOARD_MODE	MUSB_HOST
+ #endif
+ 
++static struct musb_hdrc_eps_bits musb_eps[] = {
++	{	"ep1_tx", 5,	},
++	{	"ep1_rx", 5,	},
++	{	"ep2_tx", 5,	},
++	{	"ep2_rx", 5,	},
++	{	"ep3_tx", 3,	},
++	{	"ep3_rx", 3,	},
++	{	"ep4_tx", 3,	},
++	{	"ep4_rx", 3,	},
++	{	"ep5_tx", 2,	},
++	{	"ep5_rx", 2,	},
++	{	"ep6_tx", 2,	},
++	{	"ep6_rx", 2,	},
++	{	"ep7_tx", 2,	},
++	{	"ep7_rx", 2,	},
++	{	"ep8_tx", 2,	},
++	{	"ep8_rx", 2,	},
++	{	"ep9_tx", 2,	},
++	{	"ep9_rx", 2,	},
++	{	"ep10_tx", 2,	},
++	{	"ep10_rx", 2,	},
++	{	"ep11_tx", 2,	},
++	{	"ep11_rx", 2,	},
++	{	"ep12_tx", 2,	},
++	{	"ep12_rx", 2,	},
++	{	"ep13_tx", 2,	},
++	{	"ep13_rx", 2,	},
++	{	"ep14_tx", 2,	},
++	{	"ep14_rx", 2,	},
++	{	"ep15_tx", 2,	},
++	{	"ep15_rx", 2,	},
++};
++
++static struct musb_hdrc_config musb_config = {
++	.multipoint	= 1,
++	.dyn_fifo	= 1,
++	.soft_con	= 1,
++	.dma		= 1,
++	.num_eps	= 32,
++	.dma_channels	= 7,
++	.ram_bits	= 12,
++	.eps_bits	= musb_eps,
++};
++
+ static struct musb_hdrc_platform_data tusb_data = {
+ 	.mode		= BOARD_MODE,
+-	.multipoint	= 1,
+ 	.set_power	= tusb_set_power,
+ 	.set_clock	= tusb_set_clock,
+ 	.min_power	= 25,	/* x2 = 50 mA drawn from VBUS as peripheral */
+ 	.power		= 100,	/* Max 100 mA VBUS for host mode */
+ 	.clock		= "osc_ck",
++	.config		= &musb_config,
+ };
+ 
+ /*
+diff --git a/arch/arm/mach-omap2/usb-musb.c b/arch/arm/mach-omap2/usb-musb.c
+index cbd59f8..842edb3 100644
+--- a/arch/arm/mach-omap2/usb-musb.c
++++ b/arch/arm/mach-omap2/usb-musb.c
+@@ -37,7 +37,7 @@ static struct resource musb_resources[] = {
+ 			: OMAP243X_HS_BASE,
+ 		.end	= cpu_is_omap34xx()
+ 			? OMAP34XX_HSUSB_OTG_BASE + SZ_8K - 1
+-			: OMAP243X_HS_BASE + SZ_8K -1,
++			: OMAP243X_HS_BASE + SZ_8K - 1,
+ 		.flags	= IORESOURCE_MEM,
+ 	},
+ 	[1] = {	/* general IRQ */
+@@ -73,6 +73,51 @@ static int musb_set_clock(struct clk *clk, int state)
+ 	return 0;
+ }
+ 
++static struct musb_hdrc_eps_bits musb_eps[] = {
++	{	"ep1_tx", 10,	},
++	{	"ep1_rx", 10,	},
++	{	"ep2_tx", 9,	},
++	{	"ep2_rx", 9,	},
++	{	"ep3_tx", 3,	},
++	{	"ep3_rx", 3,	},
++	{	"ep4_tx", 3,	},
++	{	"ep4_rx", 3,	},
++	{	"ep5_tx", 3,	},
++	{	"ep5_rx", 3,	},
++	{	"ep6_tx", 3,	},
++	{	"ep6_rx", 3,	},
++	{	"ep7_tx", 3,	},
++	{	"ep7_rx", 3,	},
++	{	"ep8_tx", 2,	},
++	{	"ep8_rx", 2,	},
++	{	"ep9_tx", 2,	},
++	{	"ep9_rx", 2,	},
++	{	"ep10_tx", 2,	},
++	{	"ep10_rx", 2,	},
++	{	"ep11_tx", 2,	},
++	{	"ep11_rx", 2,	},
++	{	"ep12_tx", 2,	},
++	{	"ep12_rx", 2,	},
++	{	"ep13_tx", 2,	},
++	{	"ep13_rx", 2,	},
++	{	"ep14_tx", 2,	},
++	{	"ep14_rx", 2,	},
++	{	"ep15_tx", 2,	},
++	{	"ep15_rx", 2,	},
++};
++
++static struct musb_hdrc_config musb_config = {
++	.multipoint	= 1,
++	.dyn_fifo	= 1,
++	.soft_con	= 1,
++	.dma		= 1,
++	.num_eps	= 32,
++	.dma_channels	= 7,
++	.dma_req_chan	= (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3),
++	.ram_bits	= 12,
++	.eps_bits	= musb_eps,
++};
++
+ static struct musb_hdrc_platform_data musb_plat = {
+ #ifdef CONFIG_USB_MUSB_OTG
+ 	.mode		= MUSB_OTG,
+@@ -81,18 +126,18 @@ static struct musb_hdrc_platform_data musb_plat = {
+ #elif defined(CONFIG_USB_GADGET_MUSB_HDRC)
+ 	.mode		= MUSB_PERIPHERAL,
+ #endif
+-	.multipoint	= 1,
+ 	.clock		= cpu_is_omap34xx()
+ 			? "hsotgusb_ick"
+ 			: "usbhs_ick",
+ 	.set_clock	= musb_set_clock,
++	.config		= &musb_config,
+ };
+ 
+ static u64 musb_dmamask = ~(u32)0;
+ 
+ static struct platform_device musb_device = {
+ 	.name		= "musb_hdrc",
+-	.id		= 0,
++	.id		= -1,
+ 	.dev = {
+ 		.dma_mask		= &musb_dmamask,
+ 		.coherent_dma_mask	= 0xffffffff,
+diff --git a/arch/arm/mach-omap2/usb-tusb6010.c b/arch/arm/mach-omap2/usb-tusb6010.c
+index 9924300..75e2669 100644
+--- a/arch/arm/mach-omap2/usb-tusb6010.c
++++ b/arch/arm/mach-omap2/usb-tusb6010.c
+@@ -315,7 +315,6 @@ tusb6010_setup_interface(struct musb_hdrc_platform_data *data,
+ 		printk(error, 6, status);
+ 		return -ENODEV;
+ 	}
+-	data->multipoint = 1;
+ 	tusb_device.dev.platform_data = data;
+ 
+ 	/* REVISIT let the driver know what DMA channels work */
+diff --git a/drivers/usb/musb/musb_core.c b/drivers/usb/musb/musb_core.c
+index 1404a10..2135252 100644
+--- a/drivers/usb/musb/musb_core.c
++++ b/drivers/usb/musb/musb_core.c
+@@ -990,12 +990,6 @@ static void musb_shutdown(struct platform_device *pdev)
+  * We don't currently use dynamic fifo setup capability to do anything
+  * more than selecting one of a bunch of predefined configurations.
+  */
+-#ifdef MUSB_C_DYNFIFO_DEF
+-#define	can_dynfifo()	1
+-#else
+-#define	can_dynfifo()	0
+-#endif
+-
+ #if defined(CONFIG_USB_TUSB6010) || \
+ 	defined(CONFIG_ARCH_OMAP2430) || defined(CONFIG_ARCH_OMAP34XX)
+ static ushort __initdata fifo_mode = 4;
+@@ -1008,8 +1002,6 @@ module_param(fifo_mode, ushort, 0);
+ MODULE_PARM_DESC(fifo_mode, "initial endpoint configuration");
+ 
+ 
+-#define DYN_FIFO_SIZE (1<<(MUSB_C_RAM_BITS+2))
+-
+ enum fifo_style { FIFO_RXTX, FIFO_TX, FIFO_RX } __attribute__ ((packed));
+ enum buf_mode { BUF_SINGLE, BUF_DOUBLE } __attribute__ ((packed));
+ 
+@@ -1080,17 +1072,17 @@ static struct fifo_cfg __initdata mode_4_cfg[] = {
+ { .hw_ep_num =  7, .style = FIFO_TX,   .maxpacket = 512, },
+ { .hw_ep_num =  7, .style = FIFO_RX,   .maxpacket = 512, },
+ { .hw_ep_num =  8, .style = FIFO_TX,   .maxpacket = 512, },
+-{ .hw_ep_num =  8, .style = FIFO_RX,   .maxpacket = 512, },
++{ .hw_ep_num =  8, .style = FIFO_RX,   .maxpacket =  64, },
+ { .hw_ep_num =  9, .style = FIFO_TX,   .maxpacket = 512, },
+-{ .hw_ep_num =  9, .style = FIFO_RX,   .maxpacket = 512, },
++{ .hw_ep_num =  9, .style = FIFO_RX,   .maxpacket =  64, },
+ { .hw_ep_num = 10, .style = FIFO_TX,   .maxpacket = 512, },
+-{ .hw_ep_num = 10, .style = FIFO_RX,   .maxpacket = 512, },
+-{ .hw_ep_num = 11, .style = FIFO_TX,   .maxpacket = 512, },
+-{ .hw_ep_num = 11, .style = FIFO_RX,   .maxpacket = 512, },
+-{ .hw_ep_num = 12, .style = FIFO_TX,   .maxpacket = 512, },
+-{ .hw_ep_num = 12, .style = FIFO_RX,   .maxpacket = 512, },
+-{ .hw_ep_num = 13, .style = FIFO_TX,   .maxpacket = 512, },
+-{ .hw_ep_num = 13, .style = FIFO_RX,   .maxpacket = 512, },
++{ .hw_ep_num = 10, .style = FIFO_RX,   .maxpacket =  64, },
++{ .hw_ep_num = 11, .style = FIFO_TX,   .maxpacket = 256, },
++{ .hw_ep_num = 11, .style = FIFO_RX,   .maxpacket = 256, },
++{ .hw_ep_num = 12, .style = FIFO_TX,   .maxpacket = 256, },
++{ .hw_ep_num = 12, .style = FIFO_RX,   .maxpacket = 256, },
++{ .hw_ep_num = 13, .style = FIFO_TX,   .maxpacket = 256, },
++{ .hw_ep_num = 13, .style = FIFO_RX,   .maxpacket = 4096, },
+ { .hw_ep_num = 14, .style = FIFO_RXTX, .maxpacket = 1024, },
+ { .hw_ep_num = 15, .style = FIFO_RXTX, .maxpacket = 1024, },
+ };
+@@ -1119,11 +1111,12 @@ fifo_setup(struct musb *musb, struct musb_hw_ep  *hw_ep,
+ 
+ 	c_size = size - 3;
+ 	if (cfg->mode == BUF_DOUBLE) {
+-		if ((offset + (maxpacket << 1)) > DYN_FIFO_SIZE)
++		if ((offset + (maxpacket << 1)) >
++				(1 << (musb->config->ram_bits + 2)))
+ 			return -EMSGSIZE;
+ 		c_size |= MUSB_FIFOSZ_DPB;
+ 	} else {
+-		if ((offset + maxpacket) > DYN_FIFO_SIZE)
++		if ((offset + maxpacket) > (1 << (musb->config->ram_bits + 2)))
+ 			return -EMSGSIZE;
+ 	}
+ 
+@@ -1219,13 +1212,13 @@ static int __init ep_config_from_table(struct musb *musb)
+ 	/* assert(offset > 0) */
+ 
+ 	/* NOTE:  for RTL versions >= 1.400 EPINFO and RAMINFO would
+-	 * be better than static MUSB_C_NUM_EPS and DYN_FIFO_SIZE...
++	 * be better than static musb->config->num_eps and DYN_FIFO_SIZE...
+ 	 */
+ 
+ 	for (i = 0; i < n; i++) {
+ 		u8	epn = cfg->hw_ep_num;
+ 
+-		if (epn >= MUSB_C_NUM_EPS) {
++		if (epn >= musb->config->num_eps) {
+ 			pr_debug("%s: invalid ep %d\n",
+ 					musb_driver_name, epn);
+ 			continue;
+@@ -1242,8 +1235,8 @@ static int __init ep_config_from_table(struct musb *musb)
+ 
+ 	printk(KERN_DEBUG "%s: %d/%d max ep, %d/%d memory\n",
+ 			musb_driver_name,
+-			n + 1, MUSB_C_NUM_EPS * 2 - 1,
+-			offset, DYN_FIFO_SIZE);
++			n + 1, musb->config->num_eps * 2 - 1,
++			offset, (1 << (musb->config->ram_bits + 2)));
+ 
+ #ifdef CONFIG_USB_MUSB_HDRC_HCD
+ 	if (!musb->bulk_ep) {
+@@ -1270,7 +1263,7 @@ static int __init ep_config_from_hw(struct musb *musb)
+ 
+ 	/* FIXME pick up ep0 maxpacket size */
+ 
+-	for (epnum = 1; epnum < MUSB_C_NUM_EPS; epnum++) {
++	for (epnum = 1; epnum < musb->config->num_eps; epnum++) {
+ 		musb_ep_select(mbase, epnum);
+ 		hw_ep = musb->endpoints + epnum;
+ 
+@@ -1342,7 +1335,7 @@ static int __init musb_core_init(u16 musb_type, struct musb *musb)
+ 
+ 	/* log core options (read using indexed model) */
+ 	musb_ep_select(mbase, 0);
+-	reg = musb_readb(mbase, 0x10 + MUSB_CONFIGDATA);
++	reg = musb_readb(mbase, MUSB_EP_OFFSET(0, MUSB_CONFIGDATA));
+ 
+ 	strcpy(aInfo, (reg & MUSB_CONFIGDATA_UTMIDW) ? "UTMI-16" : "UTMI-8");
+ 	if (reg & MUSB_CONFIGDATA_DYNFIFO)
+@@ -1424,14 +1417,14 @@ static int __init musb_core_init(u16 musb_type, struct musb *musb)
+ 	musb->epmask = 1;
+ 
+ 	if (reg & MUSB_CONFIGDATA_DYNFIFO) {
+-		if (can_dynfifo())
++		if (musb->config->dyn_fifo)
+ 			status = ep_config_from_table(musb);
+ 		else {
+ 			ERR("reconfigure software for Dynamic FIFOs\n");
+ 			status = -ENODEV;
+ 		}
+ 	} else {
+-		if (!can_dynfifo())
++		if (!musb->config->dyn_fifo)
+ 			status = ep_config_from_hw(musb);
+ 		else {
+ 			ERR("reconfigure software for static FIFOs\n");
+@@ -1788,7 +1781,8 @@ static void musb_irq_work(struct work_struct *data)
+  */
+ 
+ static struct musb *__init
+-allocate_instance(struct device *dev, void __iomem *mbase)
++allocate_instance(struct device *dev,
++		struct musb_hdrc_config *config, void __iomem *mbase)
+ {
+ 	struct musb		*musb;
+ 	struct musb_hw_ep	*ep;
+@@ -1820,8 +1814,9 @@ allocate_instance(struct device *dev, void __iomem *mbase)
+ 	musb->mregs = mbase;
+ 	musb->ctrl_base = mbase;
+ 	musb->nIrq = -ENODEV;
++	musb->config = config;
+ 	for (epnum = 0, ep = musb->endpoints;
+-			epnum < MUSB_C_NUM_EPS;
++			epnum < musb->config->num_eps;
+ 			epnum++, ep++) {
+ 
+ 		ep->musb = musb;
+@@ -1932,7 +1927,7 @@ bad_config:
+ 	}
+ 
+ 	/* allocate */
+-	musb = allocate_instance(dev, ctrl);
++	musb = allocate_instance(dev, plat->config, ctrl);
+ 	if (!musb)
+ 		return -ENOMEM;
+ 
+@@ -1990,7 +1985,7 @@ bad_config:
+ 	musb_generic_disable(musb);
+ 
+ 	/* setup musb parts of the core (especially endpoints) */
+-	status = musb_core_init(plat->multipoint
++	status = musb_core_init(plat->config->multipoint
+ 			? MUSB_CONTROLLER_MHDRC
+ 			: MUSB_CONTROLLER_HDRC, musb);
+ 	if (status < 0)
+diff --git a/drivers/usb/musb/musb_core.h b/drivers/usb/musb/musb_core.h
+index c2cd5a9..2096469 100644
+--- a/drivers/usb/musb/musb_core.h
++++ b/drivers/usb/musb/musb_core.h
+@@ -56,18 +56,6 @@ struct musb_ep;
+ #include "musb_debug.h"
+ #include "musb_dma.h"
+ 
+-#ifdef CONFIG_USB_MUSB_SOC
+-/*
+- * Get core configuration from a header converted (by cfg_conv)
+- * from the Verilog config file generated by the core config utility
+- *
+- * For now we assume that header is provided along with other
+- * arch-specific files.  Discrete chips will need a build tweak.
+- * So will using AHB IDs from silicon that provides them.
+- */
+-#include <asm/arch/hdrc_cnf.h>
+-#endif
+-
+ #include "musb_io.h"
+ #include "musb_regs.h"
+ 
+@@ -439,6 +427,8 @@ struct musb {
+ 	struct usb_gadget_driver *gadget_driver;	/* its driver */
+ #endif
+ 
++	struct musb_hdrc_config *config;
++
+ #ifdef MUSB_CONFIG_PROC_FS
+ 	struct proc_dir_entry *proc_entry;
+ #endif
+diff --git a/drivers/usb/musb/musb_host.c b/drivers/usb/musb/musb_host.c
+index 08e421f..c3e8e17 100644
+--- a/drivers/usb/musb/musb_host.c
++++ b/drivers/usb/musb/musb_host.c
+@@ -291,6 +291,7 @@ __acquires(musb->lock)
+ 			urb->actual_length, urb->transfer_buffer_length
+ 			);
+ 
++	usb_hcd_unlink_urb_from_ep(musb_to_hcd(musb), urb);
+ 	spin_unlock(&musb->lock);
+ 	usb_hcd_giveback_urb(musb_to_hcd(musb), urb, status);
+ 	spin_lock(&musb->lock);
+@@ -353,8 +354,6 @@ musb_giveback(struct musb_qh *qh, struct urb *urb, int status)
+ 		break;
+ 	}
+ 
+-	usb_hcd_unlink_urb_from_ep(musb_to_hcd(musb), urb);
+-
+ 	qh->is_ready = 0;
+ 	__musb_giveback(musb, urb, status);
+ 	qh->is_ready = ready;
+@@ -427,8 +426,17 @@ musb_advance_schedule(struct musb *musb, struct urb *urb,
+ 		qh = musb_giveback(qh, urb, 0);
+ 	else
+ 		qh = musb_giveback(qh, urb, urb->status);
++	while (qh && qh->is_ready && list_empty(&qh->hep->urb_list)) {
++		struct list_head *head;
++		head = qh->ring.prev;
++		list_del(&qh->ring);
++		qh->hep->hcpriv = NULL;
++		kfree(qh);
++		qh = first_qh(head);
++	}
+ 
+-	if (qh && qh->is_ready && !list_empty(&qh->hep->urb_list)) {
++
++	if (qh && qh->is_ready) {
+ 		DBG(4, "... next ep%d %cX urb %p\n",
+ 				hw_ep->epnum, is_in ? 'R' : 'T',
+ 				next_urb(qh));
+@@ -1443,6 +1451,10 @@ void musb_host_rx(struct musb *musb, u8 epnum)
+ 			/* packet error reported later */
+ 			iso_err = true;
+ 		}
++	} else if (rx_csr & MUSB_RXCSR_INCOMPRX) {
++		DBG(3, "end %d Highbandwidth  incomplete ISO packet received\n"
++					, epnum);
++		status = -EPROTO;
+ 	}
+ 
+ 	/* faults abort the transfer */
+@@ -1505,10 +1517,29 @@ void musb_host_rx(struct musb *musb, u8 epnum)
+ 		musb_writew(hw_ep->regs, MUSB_RXCSR, val);
+ 
+ #ifdef CONFIG_USB_INVENTRA_DMA
++		if (usb_pipeisoc(pipe)) {
++			struct usb_iso_packet_descriptor *d;
++
++			d = urb->iso_frame_desc + qh->iso_idx;
++			d->actual_length = xfer_len;
++
++			/* even if there was an error, we did the dma
++			 * for iso_frame_desc->length
++			 */
++			if (d->status != EILSEQ && d->status != -EOVERFLOW)
++				d->status = 0;
++
++			if (++qh->iso_idx >= urb->number_of_packets)
++				done = true;
++			else
++				done = false;
++
++		} else  {
+ 		/* done if urb buffer is full or short packet is recd */
+ 		done = (urb->actual_length + xfer_len >=
+ 				urb->transfer_buffer_length
+ 			|| dma->actual_len < qh->maxpacket);
++		}
+ 
+ 		/* send IN token for next packet, without AUTOREQ */
+ 		if (!done) {
+@@ -1545,7 +1576,8 @@ void musb_host_rx(struct musb *musb, u8 epnum)
+ 		if (dma) {
+ 			struct dma_controller	*c;
+ 			u16			rx_count;
+-			int			ret;
++			int			ret, length;
++			dma_addr_t		buf;
+ 
+ 			rx_count = musb_readw(epio, MUSB_RXCOUNT);
+ 
+@@ -1558,6 +1590,35 @@ void musb_host_rx(struct musb *musb, u8 epnum)
+ 
+ 			c = musb->dma_controller;
+ 
++			if (usb_pipeisoc(pipe)) {
++				int status = 0;
++				struct usb_iso_packet_descriptor *d;
++
++				d = urb->iso_frame_desc + qh->iso_idx;
++
++				if (iso_err) {
++					status = -EILSEQ;
++					urb->error_count++;
++				}
++				if (rx_count > d->length) {
++					if (status == 0) {
++						status = -EOVERFLOW;
++						urb->error_count++;
++					}
++					DBG(2, "** OVERFLOW %d into %d\n",\
++					    rx_count, d->length);
++
++					length = d->length;
++				} else
++					length = rx_count;
++				d->status = status;
++				buf = urb->transfer_dma + d->offset;
++			} else {
++				length = rx_count;
++				buf = urb->transfer_dma +
++						urb->actual_length;
++			}
++
+ 			dma->desired_mode = 0;
+ #ifdef USE_MODE1
+ 			/* because of the issue below, mode 1 will
+@@ -1569,6 +1630,12 @@ void musb_host_rx(struct musb *musb, u8 epnum)
+ 						urb->actual_length)
+ 					> qh->maxpacket)
+ 				dma->desired_mode = 1;
++			if (rx_count < hw_ep->max_packet_sz_rx) {
++				length = rx_count;
++				dma->bDesiredMode = 0;
++			} else {
++				length = urb->transfer_buffer_length;
++			}
+ #endif
+ 
+ /* Disadvantage of using mode 1:
+@@ -1595,7 +1662,13 @@ void musb_host_rx(struct musb *musb, u8 epnum)
+ 				val &= ~MUSB_RXCSR_H_AUTOREQ;
+ 			else
+ 				val |= MUSB_RXCSR_H_AUTOREQ;
+-			val |= MUSB_RXCSR_AUTOCLEAR | MUSB_RXCSR_DMAENAB;
++
++			if (qh->maxpacket & ~0x7ff)
++				/*Autoclear doesn't work in high bandwidth iso*/
++				val |= MUSB_RXCSR_DMAENAB;
++			else
++				val |= MUSB_RXCSR_AUTOCLEAR
++					| MUSB_RXCSR_DMAENAB;
+ 
+ 			musb_writew(epio, MUSB_RXCSR,
+ 				MUSB_RXCSR_H_WZC_BITS | val);
+@@ -1606,12 +1679,7 @@ void musb_host_rx(struct musb *musb, u8 epnum)
+ 			 */
+ 			ret = c->channel_program(
+ 				dma, qh->maxpacket,
+-				dma->desired_mode,
+-				urb->transfer_dma
+-					+ urb->actual_length,
+-				(dma->desired_mode == 0)
+-					? rx_count
+-					: urb->transfer_buffer_length);
++				dma->desired_mode, buf, length);
+ 
+ 			if (!ret) {
+ 				c->channel_release(dma);
+@@ -1628,19 +1696,6 @@ void musb_host_rx(struct musb *musb, u8 epnum)
+ 		}
+ 	}
+ 
+-	if (dma && usb_pipeisoc(pipe)) {
+-		struct usb_iso_packet_descriptor	*d;
+-		int					iso_stat = status;
+-
+-		d = urb->iso_frame_desc + qh->iso_idx;
+-		d->actual_length += xfer_len;
+-		if (iso_err) {
+-			iso_stat = -EILSEQ;
+-			urb->error_count++;
+-		}
+-		d->status = iso_stat;
+-	}
+-
+ finish:
+ 	urb->actual_length += xfer_len;
+ 	qh->offset += xfer_len;
+@@ -1666,6 +1721,7 @@ static int musb_schedule(
+ 	int			best_end, epnum;
+ 	struct musb_hw_ep	*hw_ep = NULL;
+ 	struct list_head	*head = NULL;
++	u16 			maxpacket;
+ 
+ 	/* use fixed hardware for control and bulk */
+ 	switch (qh->type) {
+@@ -1708,6 +1764,13 @@ static int musb_schedule(
+ 	best_diff = 4096;
+ 	best_end = -1;
+ 
++	if (qh->maxpacket & (1<<11))
++		maxpacket = 2 * (qh->maxpacket & 0x7ff);
++	else if (qh->maxpacket & (1<<12))
++		maxpacket = 3 * (qh->maxpacket & 0x7ff);
++	else
++		maxpacket = (qh->maxpacket & 0x7ff);
++
+ 	for (epnum = 1; epnum < musb->nr_endpoints; epnum++) {
+ 		int	diff;
+ 
+@@ -1718,9 +1781,9 @@ static int musb_schedule(
+ 			continue;
+ 
+ 		if (is_in)
+-			diff = hw_ep->max_packet_sz_rx - qh->maxpacket;
++			diff = hw_ep->max_packet_sz_rx - maxpacket;
+ 		else
+-			diff = hw_ep->max_packet_sz_tx - qh->maxpacket;
++			diff = hw_ep->max_packet_sz_tx - maxpacket;
+ 
+ 		if (diff > 0 && best_diff > diff) {
+ 			best_diff = diff;
+@@ -1751,7 +1814,7 @@ static int musb_urb_enqueue(
+ 	struct musb			*musb = hcd_to_musb(hcd);
+ 	struct usb_host_endpoint	*hep = urb->ep;
+ 	struct musb_qh			*qh = hep->hcpriv;
+-	struct usb_endpoint_descriptor	*epd = &hep->desc;
++	struct usb_endpoint_descriptor	*epd;
+ 	int				ret;
+ 	unsigned			type_reg;
+ 	unsigned			interval;
+@@ -1787,23 +1850,20 @@ static int musb_urb_enqueue(
+ 	 */
+ 	qh = kzalloc(sizeof *qh, mem_flags);
+ 	if (!qh) {
++		spin_lock_irqsave(&musb->lock, flags);
+ 		usb_hcd_unlink_urb_from_ep(hcd, urb);
++		spin_unlock_irqrestore(&musb->lock, flags);
+ 		return -ENOMEM;
+ 	}
+ 
++	spin_lock_irqsave(&musb->lock, flags);
++	epd = &hep->desc;
+ 	qh->hep = hep;
+ 	qh->dev = urb->dev;
+ 	INIT_LIST_HEAD(&qh->ring);
+ 	qh->is_ready = 1;
+ 
+ 	qh->maxpacket = le16_to_cpu(epd->wMaxPacketSize);
+-
+-	/* no high bandwidth support yet */
+-	if (qh->maxpacket & ~0x7ff) {
+-		ret = -EMSGSIZE;
+-		goto done;
+-	}
+-
+ 	qh->epnum = epd->bEndpointAddress & USB_ENDPOINT_NUMBER_MASK;
+ 	qh->type = epd->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK;
+ 
+@@ -1869,7 +1929,11 @@ static int musb_urb_enqueue(
+ 			/* set up tt info if needed */
+ 			if (urb->dev->tt) {
+ 				qh->h_port_reg = (u8) urb->dev->ttport;
+-				qh->h_addr_reg |= 0x80;
++				if (urb->dev->tt->hub)
++					qh->h_addr_reg =
++						(u8) urb->dev->tt->hub->devnum;
++				if (urb->dev->tt->multi)
++					qh->h_addr_reg |= 0x80;
+ 			}
+ 		}
+ 	}
+@@ -1878,7 +1942,6 @@ static int musb_urb_enqueue(
+ 	 * until we get real dma queues (with an entry for each urb/buffer),
+ 	 * we only have work to do in the former case.
+ 	 */
+-	spin_lock_irqsave(&musb->lock, flags);
+ 	if (hep->hcpriv) {
+ 		/* some concurrent activity submitted another urb to hep...
+ 		 * odd, rare, error prone, but legal.
+@@ -1894,14 +1957,11 @@ static int musb_urb_enqueue(
+ 		/* FIXME set urb->start_frame for iso/intr, it's tested in
+ 		 * musb_start_urb(), but otherwise only konicawc cares ...
+ 		 */
+-	}
+-	spin_unlock_irqrestore(&musb->lock, flags);
+-
+-done:
+-	if (ret != 0) {
++	} else {
+ 		usb_hcd_unlink_urb_from_ep(hcd, urb);
+ 		kfree(qh);
+ 	}
++	spin_unlock_irqrestore(&musb->lock, flags);
+ 	return ret;
+ }
+ 
+@@ -1960,8 +2020,6 @@ static int musb_cleanup_urb(struct urb *urb, struct musb_qh *qh, int is_in)
+ 		/* flush cpu writebuffer */
+ 		csr = musb_readw(epio, MUSB_TXCSR);
+ 	}
+-	if (status == 0)
+-		musb_advance_schedule(ep->musb, urb, ep, is_in);
+ 	return status;
+ }
+ 
+@@ -2022,13 +2080,24 @@ static int musb_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
+ 	/* NOTE:  qh is invalid unless !list_empty(&hep->urb_list) */
+ 	if (ret < 0 || (sched && qh != first_qh(sched))) {
+ 		int	ready = qh->is_ready;
+-
++		int 	type = urb->pipe;
+ 		ret = 0;
+ 		qh->is_ready = 0;
+ 		__musb_giveback(musb, urb, 0);
+-		qh->is_ready = ready;
+-	} else
++
++		if (list_empty(&qh->hep->urb_list) && list_empty(&qh->ring))
++			list_del(&qh->ring);
++		else
++			qh->is_ready = ready;
++		if (usb_pipeisoc(type))
++			musb->periodic[qh->hw_ep->epnum] = NULL;
++	} else {
+ 		ret = musb_cleanup_urb(urb, qh, urb->pipe & USB_DIR_IN);
++		if (!ret) {
++			musb_advance_schedule(qh->hw_ep->musb, urb, qh->hw_ep,
++					urb->pipe & USB_DIR_IN);
++		}
++	}
+ done:
+ 	spin_unlock_irqrestore(&musb->lock, flags);
+ 	return ret;
+@@ -2042,14 +2111,17 @@ musb_h_disable(struct usb_hcd *hcd, struct usb_host_endpoint *hep)
+ 	unsigned long		flags;
+ 	struct musb		*musb = hcd_to_musb(hcd);
+ 	u8			is_in = epnum & USB_DIR_IN;
+-	struct musb_qh		*qh = hep->hcpriv;
++	struct musb_qh		*qh, *qh_for_curr_urb;
+ 	struct urb		*urb, *tmp;
+ 	struct list_head	*sched;
+-
+-	if (!qh)
+-		return;
++	int			i;
+ 
+ 	spin_lock_irqsave(&musb->lock, flags);
++	qh = hep->hcpriv;
++	if (!qh) {
++		spin_unlock_irqrestore(&musb->lock, flags);
++		return;
++	}
+ 
+ 	switch (qh->type) {
+ 	case USB_ENDPOINT_XFER_CONTROL:
+@@ -2061,6 +2133,13 @@ musb_h_disable(struct usb_hcd *hcd, struct usb_host_endpoint *hep)
+ 		else
+ 			sched = &musb->out_bulk;
+ 		break;
++	case USB_ENDPOINT_XFER_ISOC:
++	case USB_ENDPOINT_XFER_INT:
++		for (i = 0; i < musb->nr_endpoints; i++) {
++			if (musb->periodic[i] == qh)
++				sched = &qh->ring;
++			break;
++		}
+ 	default:
+ 		/* REVISIT when we get a schedule tree, periodic transfers
+ 		 * won't always be at the head of a singleton queue...
+@@ -2069,26 +2148,47 @@ musb_h_disable(struct usb_hcd *hcd, struct usb_host_endpoint *hep)
+ 		break;
+ 	}
+ 
+-	/* NOTE:  qh is invalid unless !list_empty(&hep->urb_list) */
+-
+ 	/* kick first urb off the hardware, if needed */
+-	qh->is_ready = 0;
+-	if (!sched || qh == first_qh(sched)) {
++	if (sched) {
++		qh_for_curr_urb = qh;
+ 		urb = next_urb(qh);
+-
+-		/* make software (then hardware) stop ASAP */
+-		if (!urb->unlinked)
+-			urb->status = -ESHUTDOWN;
+-
+-		/* cleanup */
+-		musb_cleanup_urb(urb, qh, urb->pipe & USB_DIR_IN);
+-	} else
+-		urb = NULL;
+-
+-	/* then just nuke all the others */
+-	list_for_each_entry_safe_from(urb, tmp, &hep->urb_list, urb_list)
+-		musb_giveback(qh, urb, -ESHUTDOWN);
+-
++		if (urb) {
++			/* make software (then hardware) stop ASAP */
++			if (!urb->unlinked)
++				urb->status = -ESHUTDOWN;
++			/* cleanup first urb of first qh; */
++			if (qh == first_qh(sched)) {
++				musb_cleanup_urb(urb, qh,
++					urb->pipe & USB_DIR_IN);
++			}
++			qh = musb_giveback(qh, urb, -ESHUTDOWN);
++			if (qh == qh_for_curr_urb) {
++				list_for_each_entry_safe_from(urb, tmp,
++					&hep->urb_list, urb_list) {
++					qh = musb_giveback(qh, tmp, -ESHUTDOWN);
++					if (qh != qh_for_curr_urb)
++						break;
++				}
++			}
++		}
++		/* pick the next candidate and go */
++		if (qh && qh->is_ready) {
++			while (qh && qh->is_ready &&
++				list_empty(&qh->hep->urb_list)) {
++					struct list_head *head;
++					head = qh->ring.prev;
++					list_del(&qh->ring);
++					qh->hep->hcpriv = NULL;
++					kfree(qh);
++					qh = first_qh(head);
++			}
++			if (qh && qh->is_ready) {
++				epnum = qh->hep->desc.bEndpointAddress;
++				is_in = epnum & USB_DIR_IN;
++				musb_start_urb(musb, is_in, qh);
++			}
++		}
++	}
+ 	spin_unlock_irqrestore(&musb->lock, flags);
+ }
+ 
+diff --git a/drivers/usb/musb/omap2430.c b/drivers/usb/musb/omap2430.c
+index 472c304..ea5c504 100644
+--- a/drivers/usb/musb/omap2430.c
++++ b/drivers/usb/musb/omap2430.c
+@@ -53,7 +53,9 @@ static void musb_do_idle(unsigned long _musb)
+ {
+ 	struct musb	*musb = (void *)_musb;
+ 	unsigned long	flags;
++#ifdef CONFIG_USB_MUSB_HDRC_HCD
+ 	u8	power;
++#endif
+ 	u8	devctl;
+ 
+ 	devctl = musb_readb(musb->mregs, MUSB_DEVCTL);
+diff --git a/drivers/usb/musb/tusb6010.h b/drivers/usb/musb/tusb6010.h
+index db6dad0..ab8c962 100644
+--- a/drivers/usb/musb/tusb6010.h
++++ b/drivers/usb/musb/tusb6010.h
+@@ -230,173 +230,4 @@ extern u8 tusb_get_revision(struct musb *musb);
+ #define TUSB_REV_30	0x30
+ #define TUSB_REV_31	0x31
+ 
+-/*----------------------------------------------------------------------------*/
+-
+-#ifdef CONFIG_USB_TUSB6010
+-
+-/* configuration parameters specific to this silicon */
+-
+-/* Number of Tx endpoints. Legal values are 1 - 16 (this value includes EP0) */
+-#define MUSB_C_NUM_EPT 16
+-
+-/* Number of Rx endpoints. Legal values are 1 - 16 (this value includes EP0) */
+-#define MUSB_C_NUM_EPR 16
+-
+-/* Endpoint 1 to 15 direction types. C_EP1_DEF is defined if either Tx endpoint
+- * 1 or Rx endpoint 1 are used.
+- */
+-#define MUSB_C_EP1_DEF
+-
+-/* C_EP1_TX_DEF is defined if Tx endpoint 1 is used */
+-#define MUSB_C_EP1_TX_DEF
+-
+-/* C_EP1_RX_DEF is defined if Rx endpoint 1 is used */
+-#define MUSB_C_EP1_RX_DEF
+-
+-/* C_EP1_TOR_DEF is defined if Tx endpoint 1 and Rx endpoint 1 share a FIFO */
+-/* #define C_EP1_TOR_DEF */
+-
+-/* C_EP1_TAR_DEF is defined if both Tx endpoint 1 and Rx endpoint 1 are used
+- * and do not share a FIFO.
+- */
+-#define MUSB_C_EP1_TAR_DEF
+-
+-/* Similarly for all other used endpoints */
+-#define MUSB_C_EP2_DEF
+-#define MUSB_C_EP2_TX_DEF
+-#define MUSB_C_EP2_RX_DEF
+-#define MUSB_C_EP2_TAR_DEF
+-#define MUSB_C_EP3_DEF
+-#define MUSB_C_EP3_TX_DEF
+-#define MUSB_C_EP3_RX_DEF
+-#define MUSB_C_EP3_TAR_DEF
+-#define MUSB_C_EP4_DEF
+-#define MUSB_C_EP4_TX_DEF
+-#define MUSB_C_EP4_RX_DEF
+-#define MUSB_C_EP4_TAR_DEF
+-
+-/* Endpoint 1 to 15 FIFO address bits. Legal values are 3 to 13 - corresponding
+- * to FIFO sizes of 8 to 8192 bytes. If an Tx endpoint shares a FIFO with an Rx
+- * endpoint then the Rx FIFO size must be the same as the Tx FIFO size. All
+- * endpoints 1 to 15 must be defined, unused endpoints should be set to 2.
+- */
+-#define MUSB_C_EP1T_BITS 5
+-#define MUSB_C_EP1R_BITS 5
+-#define MUSB_C_EP2T_BITS 5
+-#define MUSB_C_EP2R_BITS 5
+-#define MUSB_C_EP3T_BITS 3
+-#define MUSB_C_EP3R_BITS 3
+-#define MUSB_C_EP4T_BITS 3
+-#define MUSB_C_EP4R_BITS 3
+-
+-#define MUSB_C_EP5T_BITS 2
+-#define MUSB_C_EP5R_BITS 2
+-#define MUSB_C_EP6T_BITS 2
+-#define MUSB_C_EP6R_BITS 2
+-#define MUSB_C_EP7T_BITS 2
+-#define MUSB_C_EP7R_BITS 2
+-#define MUSB_C_EP8T_BITS 2
+-#define MUSB_C_EP8R_BITS 2
+-#define MUSB_C_EP9T_BITS 2
+-#define MUSB_C_EP9R_BITS 2
+-#define MUSB_C_EP10T_BITS 2
+-#define MUSB_C_EP10R_BITS 2
+-#define MUSB_C_EP11T_BITS 2
+-#define MUSB_C_EP11R_BITS 2
+-#define MUSB_C_EP12T_BITS 2
+-#define MUSB_C_EP12R_BITS 2
+-#define MUSB_C_EP13T_BITS 2
+-#define MUSB_C_EP13R_BITS 2
+-#define MUSB_C_EP14T_BITS 2
+-#define MUSB_C_EP14R_BITS 2
+-#define MUSB_C_EP15T_BITS 2
+-#define MUSB_C_EP15R_BITS 2
+-
+-/* Define the following constant if the USB2.0 Transceiver Macrocell data width
+- * is 16-bits.
+- */
+-/* #define C_UTM_16 */
+-
+-/* Define this constant if the CPU uses big-endian byte ordering. */
+-/* #define C_BIGEND */
+-
+-/* Define the following constant if any Tx endpoint is required to support
+- * multiple bulk packets.
+- */
+-/* #define C_MP_TX */
+-
+-/* Define the following constant if any Rx endpoint is required to support
+- * multiple bulk packets.
+- */
+-/* #define C_MP_RX */
+-
+-/* Define the following constant if any Tx endpoint is required to support high
+- * bandwidth ISO.
+- */
+-/* #define C_HB_TX */
+-
+-/* Define the following constant if any Rx endpoint is required to support high
+- * bandwidth ISO.
+- */
+-/* #define C_HB_RX */
+-
+-/* Define the following constant if software connect/disconnect control is
+- * required.
+- */
+-#define MUSB_C_SOFT_CON
+-
+-/* Define the following constant if Vendor Control Registers are required. */
+-/* #define C_VEND_REG */
+-
+-/* Vendor control register widths. */
+-#define MUSB_C_VCTL_BITS 4
+-#define MUSB_C_VSTAT_BITS 8
+-
+-/* Define the following constant to include a DMA controller. */
+-/* #define C_DMA */
+-
+-/* Define the following constant if 2 or more DMA channels are required. */
+-/* #define C_DMA2 */
+-
+-/* Define the following constant if 3 or more DMA channels are required. */
+-/* #define C_DMA3 */
+-
+-/* Define the following constant if 4 or more DMA channels are required. */
+-/* #define C_DMA4 */
+-
+-/* Define the following constant if 5 or more DMA channels are required. */
+-/* #define C_DMA5 */
+-
+-/* Define the following constant if 6 or more DMA channels are required. */
+-/* #define C_DMA6 */
+-
+-/* Define the following constant if 7 or more DMA channels are required. */
+-/* #define C_DMA7 */
+-
+-/* Define the following constant if 8 or more DMA channels are required. */
+-/* #define C_DMA8 */
+-
+-/* Enable Dynamic FIFO Sizing */
+-#define MUSB_C_DYNFIFO_DEF
+-
+-/* Derived constants. The following constants are derived from the previous
+- * configuration constants
+- */
+-
+-/* Total number of endpoints. Legal values are 2 - 16. This must be equal to
+- * the larger of C_NUM_EPT, C_NUM_EPR
+- */
+-/* #define MUSB_C_NUM_EPS 5 */
+-
+-/* C_EPMAX_BITS is equal to the largest endpoint FIFO word address bits */
+-#define MUSB_C_EPMAX_BITS 11
+-
+-/* C_RAM_BITS is the number of address bits required to address the RAM (32-bit
+- * addresses).  It is defined as log2 of the sum of 2** of all the endpoint FIFO
+- * dword address bits (rounded up).
+- */
+-#define MUSB_C_RAM_BITS 12
+-
+-#endif /* CONFIG_USB_TUSB6010 */
+-
+ #endif /* __TUSB6010_H__ */
+diff --git a/drivers/usb/storage/datafab.c b/drivers/usb/storage/datafab.c
+index 579e9f5..17f1ae2 100644
+--- a/drivers/usb/storage/datafab.c
++++ b/drivers/usb/storage/datafab.c
+@@ -1,7 +1,5 @@
+ /* Driver for Datafab USB Compact Flash reader
+  *
+- * $Id: datafab.c,v 1.7 2002/02/25 00:40:13 mdharm Exp $
+- *
+  * datafab driver v0.1:
+  *
+  * First release
+diff --git a/drivers/usb/storage/debug.c b/drivers/usb/storage/debug.c
+index 01e4306..a2b5526 100644
+--- a/drivers/usb/storage/debug.c
++++ b/drivers/usb/storage/debug.c
+@@ -1,8 +1,6 @@
+ /* Driver for USB Mass Storage compliant devices
+  * Debugging Functions Source Code File
+  *
+- * $Id: debug.c,v 1.9 2002/04/22 03:39:43 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 1999-2002 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+  *
+diff --git a/drivers/usb/storage/debug.h b/drivers/usb/storage/debug.h
+index 77e244a..dbb985d 100644
+--- a/drivers/usb/storage/debug.h
++++ b/drivers/usb/storage/debug.h
+@@ -1,8 +1,6 @@
+ /* Driver for USB Mass Storage compliant devices
+  * Debugging Functions Header File
+  *
+- * $Id: debug.h,v 1.6 2001/01/12 23:51:04 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 1999-2002 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+  *
+diff --git a/drivers/usb/storage/dpcm.c b/drivers/usb/storage/dpcm.c
+index 9a410b5..9399234 100644
+--- a/drivers/usb/storage/dpcm.c
++++ b/drivers/usb/storage/dpcm.c
+@@ -1,7 +1,5 @@
+ /* Driver for Microtech DPCM-USB CompactFlash/SmartMedia reader
+  *
+- * $Id: dpcm.c,v 1.4 2001/06/11 02:54:25 mdharm Exp $
+- *
+  * DPCM driver v0.1:
+  *
+  * First release
+diff --git a/drivers/usb/storage/dpcm.h b/drivers/usb/storage/dpcm.h
+index 81b464c..e7b7b0f 100644
+--- a/drivers/usb/storage/dpcm.h
++++ b/drivers/usb/storage/dpcm.h
+@@ -1,7 +1,5 @@
+ /* Driver for Microtech DPCM-USB CompactFlash/SmartMedia reader
+  *
+- * $Id: dpcm.h,v 1.2 2000/08/25 00:13:51 mdharm Exp $
+- *
+  * DPCM driver v0.1:
+  *
+  * First release
+diff --git a/drivers/usb/storage/freecom.c b/drivers/usb/storage/freecom.c
+index f5a4e8d..73ac726 100644
+--- a/drivers/usb/storage/freecom.c
++++ b/drivers/usb/storage/freecom.c
+@@ -1,7 +1,5 @@
+ /* Driver for Freecom USB/IDE adaptor
+  *
+- * $Id: freecom.c,v 1.22 2002/04/22 03:39:43 mdharm Exp $
+- *
+  * Freecom v0.1:
+  *
+  * First release
+@@ -28,8 +26,6 @@
+  * (http://www.freecom.de/)
+  */
+ 
+-#include <linux/hdreg.h>
+-
+ #include <scsi/scsi.h>
+ #include <scsi/scsi_cmnd.h>
+ 
+diff --git a/drivers/usb/storage/freecom.h b/drivers/usb/storage/freecom.h
+index 1b012d6..20d0fe6 100644
+--- a/drivers/usb/storage/freecom.h
++++ b/drivers/usb/storage/freecom.h
+@@ -1,7 +1,5 @@
+ /* Driver for Freecom USB/IDE adaptor
+  *
+- * $Id: freecom.h,v 1.4 2000/08/29 14:49:15 dlbrown Exp $
+- *
+  * Freecom v0.1:
+  *
+  * First release
+diff --git a/drivers/usb/storage/initializers.c b/drivers/usb/storage/initializers.c
+index 187dd1e..4995bb5 100644
+--- a/drivers/usb/storage/initializers.c
++++ b/drivers/usb/storage/initializers.c
+@@ -1,7 +1,5 @@
+ /* Special Initializers for certain USB Mass Storage devices
+  *
+- * $Id: initializers.c,v 1.2 2000/09/06 22:35:57 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 1999, 2000 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+  *
+diff --git a/drivers/usb/storage/initializers.h b/drivers/usb/storage/initializers.h
+index ad3ffd4..529327f 100644
+--- a/drivers/usb/storage/initializers.h
++++ b/drivers/usb/storage/initializers.h
+@@ -1,7 +1,5 @@
+ /* Header file for Special Initializers for certain USB Mass Storage devices
+  *
+- * $Id: initializers.h,v 1.1 2000/08/29 23:07:02 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 1999, 2000 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+  *
+diff --git a/drivers/usb/storage/isd200.c b/drivers/usb/storage/isd200.c
+index 3addcd8..383abf2 100644
+--- a/drivers/usb/storage/isd200.c
++++ b/drivers/usb/storage/isd200.c
+@@ -1,7 +1,5 @@
+ /* Transport & Protocol Driver for In-System Design, Inc. ISD200 ASIC
+  *
+- * $Id: isd200.c,v 1.16 2002/04/22 03:39:43 mdharm Exp $
+- *
+  * Current development and maintenance:
+  *   (C) 2001-2002 Björn Stenberg (bjorn@haxx.se)
+  *
+@@ -586,7 +584,7 @@ static void isd200_invoke_transport( struct us_data *us,
+ 	/* if the command gets aborted by the higher layers, we need to
+ 	 * short-circuit all other processing
+ 	 */
+-	if (test_bit(US_FLIDX_TIMED_OUT, &us->flags)) {
++	if (test_bit(US_FLIDX_TIMED_OUT, &us->dflags)) {
+ 		US_DEBUGP("-- command was aborted\n");
+ 		goto Handle_Abort;
+ 	}
+@@ -633,7 +631,7 @@ static void isd200_invoke_transport( struct us_data *us,
+ 
+ 	if (need_auto_sense) {
+ 		result = isd200_read_regs(us);
+-		if (test_bit(US_FLIDX_TIMED_OUT, &us->flags)) {
++		if (test_bit(US_FLIDX_TIMED_OUT, &us->dflags)) {
+ 			US_DEBUGP("-- auto-sense aborted\n");
+ 			goto Handle_Abort;
+ 		}
+@@ -663,7 +661,7 @@ static void isd200_invoke_transport( struct us_data *us,
+ 	srb->result = DID_ABORT << 16;
+ 
+ 	/* permit the reset transfer to take place */
+-	clear_bit(US_FLIDX_ABORTING, &us->flags);
++	clear_bit(US_FLIDX_ABORTING, &us->dflags);
+ 	/* Need reset here */
+ }
+ 
+diff --git a/drivers/usb/storage/jumpshot.c b/drivers/usb/storage/jumpshot.c
+index 61097cb..df67f13 100644
+--- a/drivers/usb/storage/jumpshot.c
++++ b/drivers/usb/storage/jumpshot.c
+@@ -1,7 +1,5 @@
+ /* Driver for Lexar "Jumpshot" Compact Flash reader
+  *
+- * $Id: jumpshot.c,v 1.7 2002/02/25 00:40:13 mdharm Exp $
+- *
+  * jumpshot driver v0.1:
+  *
+  * First release
+diff --git a/drivers/usb/storage/protocol.c b/drivers/usb/storage/protocol.c
+index b9b8ede..3b3357e 100644
+--- a/drivers/usb/storage/protocol.c
++++ b/drivers/usb/storage/protocol.c
+@@ -1,7 +1,5 @@
+ /* Driver for USB Mass Storage compliant devices
+  *
+- * $Id: protocol.c,v 1.14 2002/04/22 03:39:43 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 1999-2002 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+  *
+diff --git a/drivers/usb/storage/protocol.h b/drivers/usb/storage/protocol.h
+index 8737a36..487056f 100644
+--- a/drivers/usb/storage/protocol.h
++++ b/drivers/usb/storage/protocol.h
+@@ -1,8 +1,6 @@
+ /* Driver for USB Mass Storage compliant devices
+  * Protocol Functions Header File
+  *
+- * $Id: protocol.h,v 1.4 2001/02/13 07:10:03 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 1999, 2000 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+  *
+diff --git a/drivers/usb/storage/scsiglue.c b/drivers/usb/storage/scsiglue.c
+index 3fcde9f..09779f6 100644
+--- a/drivers/usb/storage/scsiglue.c
++++ b/drivers/usb/storage/scsiglue.c
+@@ -1,8 +1,6 @@
+ /* Driver for USB Mass Storage compliant devices
+  * SCSI layer glue code
+  *
+- * $Id: scsiglue.c,v 1.26 2002/04/22 03:39:43 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 1999-2002 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+  *
+@@ -73,7 +71,6 @@ static const char* host_info(struct Scsi_Host *host)
+ static int slave_alloc (struct scsi_device *sdev)
+ {
+ 	struct us_data *us = host_to_us(sdev->host);
+-	struct usb_host_endpoint *bulk_in_ep;
+ 
+ 	/*
+ 	 * Set the INQUIRY transfer length to 36.  We don't use any of
+@@ -82,16 +79,22 @@ static int slave_alloc (struct scsi_device *sdev)
+ 	 */
+ 	sdev->inquiry_len = 36;
+ 
+-	/* Scatter-gather buffers (all but the last) must have a length
+-	 * divisible by the bulk maxpacket size.  Otherwise a data packet
+-	 * would end up being short, causing a premature end to the data
+-	 * transfer.  We'll use the maxpacket value of the bulk-IN pipe
+-	 * to set the SCSI device queue's DMA alignment mask.
++	/* USB has unusual DMA-alignment requirements: Although the
++	 * starting address of each scatter-gather element doesn't matter,
++	 * the length of each element except the last must be divisible
++	 * by the Bulk maxpacket value.  There's currently no way to
++	 * express this by block-layer constraints, so we'll cop out
++	 * and simply require addresses to be aligned at 512-byte
++	 * boundaries.  This is okay since most block I/O involves
++	 * hardware sectors that are multiples of 512 bytes in length,
++	 * and since host controllers up through USB 2.0 have maxpacket
++	 * values no larger than 512.
++	 *
++	 * But it doesn't suffice for Wireless USB, where Bulk maxpacket
++	 * values can be as large as 2048.  To make that work properly
++	 * will require changes to the block layer.
+ 	 */
+-	bulk_in_ep = us->pusb_dev->ep_in[usb_pipeendpoint(us->recv_bulk_pipe)];
+-	blk_queue_update_dma_alignment(sdev->request_queue,
+-			le16_to_cpu(bulk_in_ep->desc.wMaxPacketSize) - 1);
+-			/* wMaxPacketSize must be a power of 2 */
++	blk_queue_update_dma_alignment(sdev->request_queue, (512 - 1));
+ 
+ 	/*
+ 	 * The UFI spec treates the Peripheral Qualifier bits in an
+@@ -116,10 +119,10 @@ static int slave_configure(struct scsi_device *sdev)
+ 	 * while others have trouble with more than 64K. At this time we
+ 	 * are limiting both to 32K (64 sectores).
+ 	 */
+-	if (us->flags & (US_FL_MAX_SECTORS_64 | US_FL_MAX_SECTORS_MIN)) {
++	if (us->fflags & (US_FL_MAX_SECTORS_64 | US_FL_MAX_SECTORS_MIN)) {
+ 		unsigned int max_sectors = 64;
+ 
+-		if (us->flags & US_FL_MAX_SECTORS_MIN)
++		if (us->fflags & US_FL_MAX_SECTORS_MIN)
+ 			max_sectors = PAGE_CACHE_SIZE >> 9;
+ 		if (sdev->request_queue->max_sectors > max_sectors)
+ 			blk_queue_max_sectors(sdev->request_queue,
+@@ -148,7 +151,7 @@ static int slave_configure(struct scsi_device *sdev)
+ 		 * majority of devices work fine, but a few still can't
+ 		 * handle it.  The sd driver will simply assume those
+ 		 * devices are write-enabled. */
+-		if (us->flags & US_FL_NO_WP_DETECT)
++		if (us->fflags & US_FL_NO_WP_DETECT)
+ 			sdev->skip_ms_page_3f = 1;
+ 
+ 		/* A number of devices have problems with MODE SENSE for
+@@ -158,13 +161,13 @@ static int slave_configure(struct scsi_device *sdev)
+ 		/* Some disks return the total number of blocks in response
+ 		 * to READ CAPACITY rather than the highest block number.
+ 		 * If this device makes that mistake, tell the sd driver. */
+-		if (us->flags & US_FL_FIX_CAPACITY)
++		if (us->fflags & US_FL_FIX_CAPACITY)
+ 			sdev->fix_capacity = 1;
+ 
+ 		/* A few disks have two indistinguishable version, one of
+ 		 * which reports the correct capacity and the other does not.
+ 		 * The sd driver has to guess which is the case. */
+-		if (us->flags & US_FL_CAPACITY_HEURISTICS)
++		if (us->fflags & US_FL_CAPACITY_HEURISTICS)
+ 			sdev->guess_capacity = 1;
+ 
+ 		/* Some devices report a SCSI revision level above 2 but are
+@@ -213,7 +216,7 @@ static int slave_configure(struct scsi_device *sdev)
+ 
+ 	/* Some devices choke when they receive a PREVENT-ALLOW MEDIUM
+ 	 * REMOVAL command, so suppress those commands. */
+-	if (us->flags & US_FL_NOT_LOCKABLE)
++	if (us->fflags & US_FL_NOT_LOCKABLE)
+ 		sdev->lockable = 0;
+ 
+ 	/* this is to satisfy the compiler, tho I don't think the 
+@@ -238,7 +241,7 @@ static int queuecommand(struct scsi_cmnd *srb,
+ 	}
+ 
+ 	/* fail the command if we are disconnecting */
+-	if (test_bit(US_FLIDX_DISCONNECTING, &us->flags)) {
++	if (test_bit(US_FLIDX_DISCONNECTING, &us->dflags)) {
+ 		US_DEBUGP("Fail command during disconnect\n");
+ 		srb->result = DID_NO_CONNECT << 16;
+ 		done(srb);
+@@ -248,7 +251,7 @@ static int queuecommand(struct scsi_cmnd *srb,
+ 	/* enqueue the command and wake up the control thread */
+ 	srb->scsi_done = done;
+ 	us->srb = srb;
+-	up(&(us->sema));
++	complete(&us->cmnd_ready);
+ 
+ 	return 0;
+ }
+@@ -280,9 +283,9 @@ static int command_abort(struct scsi_cmnd *srb)
+ 	 * with the reset).  Note that we must retain the host lock while
+ 	 * calling usb_stor_stop_transport(); otherwise it might interfere
+ 	 * with an auto-reset that begins as soon as we release the lock. */
+-	set_bit(US_FLIDX_TIMED_OUT, &us->flags);
+-	if (!test_bit(US_FLIDX_RESETTING, &us->flags)) {
+-		set_bit(US_FLIDX_ABORTING, &us->flags);
++	set_bit(US_FLIDX_TIMED_OUT, &us->dflags);
++	if (!test_bit(US_FLIDX_RESETTING, &us->dflags)) {
++		set_bit(US_FLIDX_ABORTING, &us->dflags);
+ 		usb_stor_stop_transport(us);
+ 	}
+ 	scsi_unlock(us_to_host(us));
+@@ -329,7 +332,7 @@ void usb_stor_report_device_reset(struct us_data *us)
+ 	struct Scsi_Host *host = us_to_host(us);
+ 
+ 	scsi_report_device_reset(host, 0, 0);
+-	if (us->flags & US_FL_SCM_MULT_TARG) {
++	if (us->fflags & US_FL_SCM_MULT_TARG) {
+ 		for (i = 1; i < host->max_id; ++i)
+ 			scsi_report_device_reset(host, 0, i);
+ 	}
+@@ -400,7 +403,7 @@ static int proc_info (struct Scsi_Host *host, char *buffer,
+ 		pos += sprintf(pos, "       Quirks:");
+ 
+ #define US_FLAG(name, value) \
+-	if (us->flags & value) pos += sprintf(pos, " " #name);
++	if (us->fflags & value) pos += sprintf(pos, " " #name);
+ US_DO_ALL_FLAGS
+ #undef US_FLAG
+ 
+diff --git a/drivers/usb/storage/scsiglue.h b/drivers/usb/storage/scsiglue.h
+index 737e4fa..ffa1cca 100644
+--- a/drivers/usb/storage/scsiglue.h
++++ b/drivers/usb/storage/scsiglue.h
+@@ -1,8 +1,6 @@
+ /* Driver for USB Mass Storage compliant devices
+  * SCSI Connecting Glue Header File
+  *
+- * $Id: scsiglue.h,v 1.4 2000/08/25 00:13:51 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 1999, 2000 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+  *
+diff --git a/drivers/usb/storage/sddr09.c b/drivers/usb/storage/sddr09.c
+index 8972b17..c5a54b8 100644
+--- a/drivers/usb/storage/sddr09.c
++++ b/drivers/usb/storage/sddr09.c
+@@ -1,6 +1,5 @@
+ /* Driver for SanDisk SDDR-09 SmartMedia reader
+  *
+- * $Id: sddr09.c,v 1.24 2002/04/22 03:39:43 mdharm Exp $
+  *   (c) 2000, 2001 Robert Baruch (autophile@starband.net)
+  *   (c) 2002 Andries Brouwer (aeb@cwi.nl)
+  * Developed with the assistance of:
+diff --git a/drivers/usb/storage/sddr09.h b/drivers/usb/storage/sddr09.h
+index c03089a..e50033a 100644
+--- a/drivers/usb/storage/sddr09.h
++++ b/drivers/usb/storage/sddr09.h
+@@ -1,8 +1,6 @@
+ /* Driver for SanDisk SDDR-09 SmartMedia reader
+  * Header File
+  *
+- * $Id: sddr09.h,v 1.5 2000/08/25 00:13:51 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 2000 Robert Baruch (autophile@dol.net)
+  *   (c) 2002 Andries Brouwer (aeb@cwi.nl)
+diff --git a/drivers/usb/storage/sddr55.c b/drivers/usb/storage/sddr55.c
+index 6d14327..0d8df75 100644
+--- a/drivers/usb/storage/sddr55.c
++++ b/drivers/usb/storage/sddr55.c
+@@ -1,7 +1,5 @@
+ /* Driver for SanDisk SDDR-55 SmartMedia reader
+  *
+- * $Id:$
+- *
+  * SDDR55 driver v0.1:
+  *
+  * First release
+diff --git a/drivers/usb/storage/sddr55.h b/drivers/usb/storage/sddr55.h
+index d6bd32f..a815a04 100644
+--- a/drivers/usb/storage/sddr55.h
++++ b/drivers/usb/storage/sddr55.h
+@@ -1,8 +1,6 @@
+ /* Driver for SanDisk SDDR-55 SmartMedia reader
+  * Header File
+  *
+- * $Id:$
+- *
+  * Current development and maintenance by:
+  *   (c) 2002 Simon Munton
+  *
+diff --git a/drivers/usb/storage/shuttle_usbat.c b/drivers/usb/storage/shuttle_usbat.c
+index 570c125..ae6d648 100644
+--- a/drivers/usb/storage/shuttle_usbat.c
++++ b/drivers/usb/storage/shuttle_usbat.c
+@@ -1,7 +1,5 @@
+ /* Driver for SCM Microsystems (a.k.a. Shuttle) USB-ATAPI cable
+  *
+- * $Id: shuttle_usbat.c,v 1.17 2002/04/22 03:39:43 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 2000, 2001 Robert Baruch (autophile@starband.net)
+  *   (c) 2004, 2005 Daniel Drake <dsd@gentoo.org>
+diff --git a/drivers/usb/storage/shuttle_usbat.h b/drivers/usb/storage/shuttle_usbat.h
+index 3ddf143..d8bfc43 100644
+--- a/drivers/usb/storage/shuttle_usbat.h
++++ b/drivers/usb/storage/shuttle_usbat.h
+@@ -1,8 +1,6 @@
+ /* Driver for SCM Microsystems USB-ATAPI cable
+  * Header File
+  *
+- * $Id: shuttle_usbat.h,v 1.5 2000/09/17 14:44:52 groovyjava Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 2000 Robert Baruch (autophile@dol.net)
+  *   (c) 2004, 2005 Daniel Drake <dsd@gentoo.org>
+diff --git a/drivers/usb/storage/transport.c b/drivers/usb/storage/transport.c
+index 6610d2d..fcbbfdb 100644
+--- a/drivers/usb/storage/transport.c
++++ b/drivers/usb/storage/transport.c
+@@ -1,7 +1,5 @@
+ /* Driver for USB Mass Storage compliant devices
+  *
+- * $Id: transport.c,v 1.47 2002/04/22 03:39:43 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 1999-2002 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+  *
+@@ -75,14 +73,14 @@
+  * by a separate code path.)
+  *
+  * The abort function (usb_storage_command_abort() in scsiglue.c) first
+- * sets the machine state and the ABORTING bit in us->flags to prevent
++ * sets the machine state and the ABORTING bit in us->dflags to prevent
+  * new URBs from being submitted.  It then calls usb_stor_stop_transport()
+- * below, which atomically tests-and-clears the URB_ACTIVE bit in us->flags
++ * below, which atomically tests-and-clears the URB_ACTIVE bit in us->dflags
+  * to see if the current_urb needs to be stopped.  Likewise, the SG_ACTIVE
+  * bit is tested to see if the current_sg scatter-gather request needs to be
+  * stopped.  The timeout callback routine does much the same thing.
+  *
+- * When a disconnect occurs, the DISCONNECTING bit in us->flags is set to
++ * When a disconnect occurs, the DISCONNECTING bit in us->dflags is set to
+  * prevent new URBs from being submitted, and usb_stor_stop_transport() is
+  * called to stop any ongoing requests.
+  *
+@@ -127,8 +125,8 @@ static int usb_stor_msg_common(struct us_data *us, int timeout)
+ 	long timeleft;
+ 	int status;
+ 
+-	/* don't submit URBs during abort/disconnect processing */
+-	if (us->flags & ABORTING_OR_DISCONNECTING)
++	/* don't submit URBs during abort processing */
++	if (test_bit(US_FLIDX_ABORTING, &us->dflags))
+ 		return -EIO;
+ 
+ 	/* set up data structures for the wakeup system */
+@@ -159,13 +157,13 @@ static int usb_stor_msg_common(struct us_data *us, int timeout)
+ 
+ 	/* since the URB has been submitted successfully, it's now okay
+ 	 * to cancel it */
+-	set_bit(US_FLIDX_URB_ACTIVE, &us->flags);
++	set_bit(US_FLIDX_URB_ACTIVE, &us->dflags);
+ 
+-	/* did an abort/disconnect occur during the submission? */
+-	if (us->flags & ABORTING_OR_DISCONNECTING) {
++	/* did an abort occur during the submission? */
++	if (test_bit(US_FLIDX_ABORTING, &us->dflags)) {
+ 
+ 		/* cancel the URB, if it hasn't been cancelled already */
+-		if (test_and_clear_bit(US_FLIDX_URB_ACTIVE, &us->flags)) {
++		if (test_and_clear_bit(US_FLIDX_URB_ACTIVE, &us->dflags)) {
+ 			US_DEBUGP("-- cancelling URB\n");
+ 			usb_unlink_urb(us->current_urb);
+ 		}
+@@ -175,7 +173,7 @@ static int usb_stor_msg_common(struct us_data *us, int timeout)
+ 	timeleft = wait_for_completion_interruptible_timeout(
+ 			&urb_done, timeout ? : MAX_SCHEDULE_TIMEOUT);
+  
+-	clear_bit(US_FLIDX_URB_ACTIVE, &us->flags);
++	clear_bit(US_FLIDX_URB_ACTIVE, &us->dflags);
+ 
+ 	if (timeleft <= 0) {
+ 		US_DEBUGP("%s -- cancelling URB\n",
+@@ -419,8 +417,8 @@ static int usb_stor_bulk_transfer_sglist(struct us_data *us, unsigned int pipe,
+ {
+ 	int result;
+ 
+-	/* don't submit s-g requests during abort/disconnect processing */
+-	if (us->flags & ABORTING_OR_DISCONNECTING)
++	/* don't submit s-g requests during abort processing */
++	if (test_bit(US_FLIDX_ABORTING, &us->dflags))
+ 		return USB_STOR_XFER_ERROR;
+ 
+ 	/* initialize the scatter-gather request block */
+@@ -435,13 +433,13 @@ static int usb_stor_bulk_transfer_sglist(struct us_data *us, unsigned int pipe,
+ 
+ 	/* since the block has been initialized successfully, it's now
+ 	 * okay to cancel it */
+-	set_bit(US_FLIDX_SG_ACTIVE, &us->flags);
++	set_bit(US_FLIDX_SG_ACTIVE, &us->dflags);
+ 
+-	/* did an abort/disconnect occur during the submission? */
+-	if (us->flags & ABORTING_OR_DISCONNECTING) {
++	/* did an abort occur during the submission? */
++	if (test_bit(US_FLIDX_ABORTING, &us->dflags)) {
+ 
+ 		/* cancel the request, if it hasn't been cancelled already */
+-		if (test_and_clear_bit(US_FLIDX_SG_ACTIVE, &us->flags)) {
++		if (test_and_clear_bit(US_FLIDX_SG_ACTIVE, &us->dflags)) {
+ 			US_DEBUGP("-- cancelling sg request\n");
+ 			usb_sg_cancel(&us->current_sg);
+ 		}
+@@ -449,7 +447,7 @@ static int usb_stor_bulk_transfer_sglist(struct us_data *us, unsigned int pipe,
+ 
+ 	/* wait for the completion of the transfer */
+ 	usb_sg_wait(&us->current_sg);
+-	clear_bit(US_FLIDX_SG_ACTIVE, &us->flags);
++	clear_bit(US_FLIDX_SG_ACTIVE, &us->dflags);
+ 
+ 	result = us->current_sg.status;
+ 	if (act_len)
+@@ -530,7 +528,7 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+ 	/* if the command gets aborted by the higher layers, we need to
+ 	 * short-circuit all other processing
+ 	 */
+-	if (test_bit(US_FLIDX_TIMED_OUT, &us->flags)) {
++	if (test_bit(US_FLIDX_TIMED_OUT, &us->dflags)) {
+ 		US_DEBUGP("-- command was aborted\n");
+ 		srb->result = DID_ABORT << 16;
+ 		goto Handle_Errors;
+@@ -616,7 +614,7 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+ 		/* let's clean up right away */
+ 		scsi_eh_restore_cmnd(srb, &ses);
+ 
+-		if (test_bit(US_FLIDX_TIMED_OUT, &us->flags)) {
++		if (test_bit(US_FLIDX_TIMED_OUT, &us->dflags)) {
+ 			US_DEBUGP("-- auto-sense aborted\n");
+ 			srb->result = DID_ABORT << 16;
+ 			goto Handle_Errors;
+@@ -629,7 +627,7 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+ 			 * auto-sense is perfectly valid
+ 			 */
+ 			srb->result = DID_ERROR << 16;
+-			if (!(us->flags & US_FL_SCM_MULT_TARG))
++			if (!(us->fflags & US_FL_SCM_MULT_TARG))
+ 				goto Handle_Errors;
+ 			return;
+ 		}
+@@ -679,8 +677,8 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+ 	/* Set the RESETTING bit, and clear the ABORTING bit so that
+ 	 * the reset may proceed. */
+ 	scsi_lock(us_to_host(us));
+-	set_bit(US_FLIDX_RESETTING, &us->flags);
+-	clear_bit(US_FLIDX_ABORTING, &us->flags);
++	set_bit(US_FLIDX_RESETTING, &us->dflags);
++	clear_bit(US_FLIDX_ABORTING, &us->dflags);
+ 	scsi_unlock(us_to_host(us));
+ 
+ 	/* We must release the device lock because the pre_reset routine
+@@ -695,7 +693,7 @@ void usb_stor_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+ 		scsi_unlock(us_to_host(us));
+ 		us->transport_reset(us);
+ 	}
+-	clear_bit(US_FLIDX_RESETTING, &us->flags);
++	clear_bit(US_FLIDX_RESETTING, &us->dflags);
+ }
+ 
+ /* Stop the current URB transfer */
+@@ -707,13 +705,13 @@ void usb_stor_stop_transport(struct us_data *us)
+ 	 * let's wake it up.  The test_and_clear_bit() call
+ 	 * guarantees that if a URB has just been submitted,
+ 	 * it won't be cancelled more than once. */
+-	if (test_and_clear_bit(US_FLIDX_URB_ACTIVE, &us->flags)) {
++	if (test_and_clear_bit(US_FLIDX_URB_ACTIVE, &us->dflags)) {
+ 		US_DEBUGP("-- cancelling URB\n");
+ 		usb_unlink_urb(us->current_urb);
+ 	}
+ 
+ 	/* If we are waiting for a scatter-gather operation, cancel it. */
+-	if (test_and_clear_bit(US_FLIDX_SG_ACTIVE, &us->flags)) {
++	if (test_and_clear_bit(US_FLIDX_SG_ACTIVE, &us->dflags)) {
+ 		US_DEBUGP("-- cancelling sg request\n");
+ 		usb_sg_cancel(&us->current_sg);
+ 	}
+@@ -914,7 +912,7 @@ int usb_stor_Bulk_transport(struct scsi_cmnd *srb, struct us_data *us)
+ 	unsigned int cbwlen = US_BULK_CB_WRAP_LEN;
+ 
+ 	/* Take care of BULK32 devices; set extra byte to 0 */
+-	if ( unlikely(us->flags & US_FL_BULK32)) {
++	if (unlikely(us->fflags & US_FL_BULK32)) {
+ 		cbwlen = 32;
+ 		us->iobuf[31] = 0;
+ 	}
+@@ -925,7 +923,7 @@ int usb_stor_Bulk_transport(struct scsi_cmnd *srb, struct us_data *us)
+ 	bcb->Flags = srb->sc_data_direction == DMA_FROM_DEVICE ? 1 << 7 : 0;
+ 	bcb->Tag = ++us->tag;
+ 	bcb->Lun = srb->device->lun;
+-	if (us->flags & US_FL_SCM_MULT_TARG)
++	if (us->fflags & US_FL_SCM_MULT_TARG)
+ 		bcb->Lun |= srb->device->id << 4;
+ 	bcb->Length = srb->cmd_len;
+ 
+@@ -951,7 +949,7 @@ int usb_stor_Bulk_transport(struct scsi_cmnd *srb, struct us_data *us)
+ 	/* Some USB-IDE converter chips need a 100us delay between the
+ 	 * command phase and the data phase.  Some devices need a little
+ 	 * more than that, probably because of clock rate inaccuracies. */
+-	if (unlikely(us->flags & US_FL_GO_SLOW))
++	if (unlikely(us->fflags & US_FL_GO_SLOW))
+ 		udelay(125);
+ 
+ 	if (transfer_length) {
+@@ -1010,7 +1008,7 @@ int usb_stor_Bulk_transport(struct scsi_cmnd *srb, struct us_data *us)
+ 	US_DEBUGP("Bulk Status S 0x%x T 0x%x R %u Stat 0x%x\n",
+ 			le32_to_cpu(bcs->Signature), bcs->Tag, 
+ 			residue, bcs->Status);
+-	if (!(bcs->Tag == us->tag || (us->flags & US_FL_BULK_IGNORE_TAG)) ||
++	if (!(bcs->Tag == us->tag || (us->fflags & US_FL_BULK_IGNORE_TAG)) ||
+ 		bcs->Status > US_BULK_STAT_PHASE) {
+ 		US_DEBUGP("Bulk logical error\n");
+ 		return USB_STOR_TRANSPORT_ERROR;
+@@ -1035,7 +1033,7 @@ int usb_stor_Bulk_transport(struct scsi_cmnd *srb, struct us_data *us)
+ 	/* try to compute the actual residue, based on how much data
+ 	 * was really transferred and what the device tells us */
+ 	if (residue) {
+-		if (!(us->flags & US_FL_IGNORE_RESIDUE)) {
++		if (!(us->fflags & US_FL_IGNORE_RESIDUE)) {
+ 			residue = min(residue, transfer_length);
+ 			scsi_set_resid(srb, max(scsi_get_resid(srb),
+ 			                                       (int) residue));
+@@ -1090,7 +1088,7 @@ static int usb_stor_reset_common(struct us_data *us,
+ 	int result;
+ 	int result2;
+ 
+-	if (test_bit(US_FLIDX_DISCONNECTING, &us->flags)) {
++	if (test_bit(US_FLIDX_DISCONNECTING, &us->dflags)) {
+ 		US_DEBUGP("No reset during disconnect\n");
+ 		return -EIO;
+ 	}
+@@ -1103,12 +1101,12 @@ static int usb_stor_reset_common(struct us_data *us,
+ 		return result;
+ 	}
+ 
+- 	/* Give the device some time to recover from the reset,
+- 	 * but don't delay disconnect processing. */
+- 	wait_event_interruptible_timeout(us->delay_wait,
+- 			test_bit(US_FLIDX_DISCONNECTING, &us->flags),
+- 			HZ*6);
+-	if (test_bit(US_FLIDX_DISCONNECTING, &us->flags)) {
++	/* Give the device some time to recover from the reset,
++	 * but don't delay disconnect processing. */
++	wait_event_interruptible_timeout(us->delay_wait,
++			test_bit(US_FLIDX_DISCONNECTING, &us->dflags),
++			HZ*6);
++	if (test_bit(US_FLIDX_DISCONNECTING, &us->dflags)) {
+ 		US_DEBUGP("Reset interrupted by disconnect\n");
+ 		return -EIO;
+ 	}
+@@ -1170,13 +1168,12 @@ int usb_stor_port_reset(struct us_data *us)
+ 		US_DEBUGP("unable to lock device for reset: %d\n", result);
+ 	else {
+ 		/* Were we disconnected while waiting for the lock? */
+-		if (test_bit(US_FLIDX_DISCONNECTING, &us->flags)) {
++		if (test_bit(US_FLIDX_DISCONNECTING, &us->dflags)) {
+ 			result = -EIO;
+ 			US_DEBUGP("No reset during disconnect\n");
+ 		} else {
+-			result = usb_reset_composite_device(
+-					us->pusb_dev, us->pusb_intf);
+-			US_DEBUGP("usb_reset_composite_device returns %d\n",
++			result = usb_reset_device(us->pusb_dev);
++			US_DEBUGP("usb_reset_device returns %d\n",
+ 					result);
+ 		}
+ 		if (rc_lock)
+diff --git a/drivers/usb/storage/transport.h b/drivers/usb/storage/transport.h
+index ada7c2f..e70b881 100644
+--- a/drivers/usb/storage/transport.h
++++ b/drivers/usb/storage/transport.h
+@@ -1,8 +1,6 @@
+ /* Driver for USB Mass Storage compliant devices
+  * Transport Functions Header File
+  *
+- * $Id: transport.h,v 1.18 2002/04/21 02:57:59 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 1999, 2000 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+  *
+diff --git a/drivers/usb/storage/unusual_devs.h b/drivers/usb/storage/unusual_devs.h
+index 39a7c11..7ae69f5 100644
+--- a/drivers/usb/storage/unusual_devs.h
++++ b/drivers/usb/storage/unusual_devs.h
+@@ -1,8 +1,6 @@
+ /* Driver for USB Mass Storage compliant devices
+  * Unusual Devices File
+  *
+- * $Id: unusual_devs.h,v 1.32 2002/02/25 02:41:24 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 2000-2002 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+  *
+@@ -1234,6 +1232,17 @@ UNUSUAL_DEV(  0x0851, 0x1543, 0x0200, 0x0200,
+ 		US_SC_DEVICE, US_PR_DEVICE, NULL,
+ 		US_FL_NOT_LOCKABLE),
+ 
++/* Andrew Lunn <andrew@lunn.ch>
++ * PanDigital Digital Picture Frame. Does not like ALLOW_MEDIUM_REMOVAL
++ * on LUN 4.
++ * Note: Vend:Prod clash with "Ltd Maxell WS30 Slim Digital Camera"
++*/
++UNUSUAL_DEV(  0x0851, 0x1543, 0x0200, 0x0200,
++		"PanDigital",
++		"Photo Frame",
++		US_SC_DEVICE, US_PR_DEVICE, NULL,
++		US_FL_NOT_LOCKABLE),
++
+ /* Submitted by Jan De Luyck <lkml@kcore.org> */
+ UNUSUAL_DEV(  0x08bd, 0x1100, 0x0000, 0x0000,
+ 		"CITIZEN",
+diff --git a/drivers/usb/storage/usb.c b/drivers/usb/storage/usb.c
+index e268aac..bfea851 100644
+--- a/drivers/usb/storage/usb.c
++++ b/drivers/usb/storage/usb.c
+@@ -1,7 +1,5 @@
+ /* Driver for USB Mass Storage compliant devices
+  *
+- * $Id: usb.c,v 1.75 2002/04/22 03:39:43 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 1999-2003 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+  *
+@@ -312,26 +310,27 @@ static int usb_stor_control_thread(void * __us)
+ 
+ 	for(;;) {
+ 		US_DEBUGP("*** thread sleeping.\n");
+-		if(down_interruptible(&us->sema))
++		if (wait_for_completion_interruptible(&us->cmnd_ready))
+ 			break;
+-			
++
+ 		US_DEBUGP("*** thread awakened.\n");
+ 
+ 		/* lock the device pointers */
+ 		mutex_lock(&(us->dev_mutex));
+ 
+-		/* if the device has disconnected, we are free to exit */
+-		if (test_bit(US_FLIDX_DISCONNECTING, &us->flags)) {
+-			US_DEBUGP("-- exiting\n");
++		/* lock access to the state */
++		scsi_lock(host);
++
++		/* When we are called with no command pending, we're done */
++		if (us->srb == NULL) {
++			scsi_unlock(host);
+ 			mutex_unlock(&us->dev_mutex);
++			US_DEBUGP("-- exiting\n");
+ 			break;
+ 		}
+ 
+-		/* lock access to the state */
+-		scsi_lock(host);
+-
+ 		/* has the command timed out *already* ? */
+-		if (test_bit(US_FLIDX_TIMED_OUT, &us->flags)) {
++		if (test_bit(US_FLIDX_TIMED_OUT, &us->dflags)) {
+ 			us->srb->result = DID_ABORT << 16;
+ 			goto SkipForAbort;
+ 		}
+@@ -350,7 +349,7 @@ static int usb_stor_control_thread(void * __us)
+ 		 * the maximum known LUN
+ 		 */
+ 		else if (us->srb->device->id && 
+-				!(us->flags & US_FL_SCM_MULT_TARG)) {
++				!(us->fflags & US_FL_SCM_MULT_TARG)) {
+ 			US_DEBUGP("Bad target number (%d:%d)\n",
+ 				  us->srb->device->id, us->srb->device->lun);
+ 			us->srb->result = DID_BAD_TARGET << 16;
+@@ -365,7 +364,7 @@ static int usb_stor_control_thread(void * __us)
+ 		/* Handle those devices which need us to fake 
+ 		 * their inquiry data */
+ 		else if ((us->srb->cmnd[0] == INQUIRY) &&
+-			    (us->flags & US_FL_FIX_INQUIRY)) {
++			    (us->fflags & US_FL_FIX_INQUIRY)) {
+ 			unsigned char data_ptr[36] = {
+ 			    0x00, 0x80, 0x02, 0x02,
+ 			    0x1F, 0x00, 0x00, 0x00};
+@@ -384,12 +383,8 @@ static int usb_stor_control_thread(void * __us)
+ 		/* lock access to the state */
+ 		scsi_lock(host);
+ 
+-		/* did the command already complete because of a disconnect? */
+-		if (!us->srb)
+-			;		/* nothing to do */
+-
+ 		/* indicate that the command is done */
+-		else if (us->srb->result != DID_ABORT << 16) {
++		if (us->srb->result != DID_ABORT << 16) {
+ 			US_DEBUGP("scsi cmd done, result=0x%x\n", 
+ 				   us->srb->result);
+ 			us->srb->scsi_done(us->srb);
+@@ -403,12 +398,12 @@ SkipForAbort:
+ 		 * the TIMED_OUT flag, not srb->result == DID_ABORT, because
+ 		 * the timeout might have occurred after the command had
+ 		 * already completed with a different result code. */
+-		if (test_bit(US_FLIDX_TIMED_OUT, &us->flags)) {
++		if (test_bit(US_FLIDX_TIMED_OUT, &us->dflags)) {
+ 			complete(&(us->notify));
+ 
+ 			/* Allow USB transfers to resume */
+-			clear_bit(US_FLIDX_ABORTING, &us->flags);
+-			clear_bit(US_FLIDX_TIMED_OUT, &us->flags);
++			clear_bit(US_FLIDX_ABORTING, &us->dflags);
++			clear_bit(US_FLIDX_TIMED_OUT, &us->dflags);
+ 		}
+ 
+ 		/* finished working on this command */
+@@ -500,9 +495,9 @@ static int get_device_info(struct us_data *us, const struct usb_device_id *id)
+ 	us->protocol = (unusual_dev->useTransport == US_PR_DEVICE) ?
+ 			idesc->bInterfaceProtocol :
+ 			unusual_dev->useTransport;
+-	us->flags = USB_US_ORIG_FLAGS(id->driver_info);
++	us->fflags = USB_US_ORIG_FLAGS(id->driver_info);
+ 
+-	if (us->flags & US_FL_IGNORE_DEVICE) {
++	if (us->fflags & US_FL_IGNORE_DEVICE) {
+ 		printk(KERN_INFO USB_STORAGE "device ignored\n");
+ 		return -ENODEV;
+ 	}
+@@ -512,7 +507,7 @@ static int get_device_info(struct us_data *us, const struct usb_device_id *id)
+ 	 * disable it if we're in full-speed
+ 	 */
+ 	if (dev->speed != USB_SPEED_HIGH)
+-		us->flags &= ~US_FL_GO_SLOW;
++		us->fflags &= ~US_FL_GO_SLOW;
+ 
+ 	/* Log a message if a non-generic unusual_dev entry contains an
+ 	 * unnecessary subclass or protocol override.  This may stimulate
+@@ -533,7 +528,7 @@ static int get_device_info(struct us_data *us, const struct usb_device_id *id)
+ 		if (unusual_dev->useTransport != US_PR_DEVICE &&
+ 			us->protocol == idesc->bInterfaceProtocol)
+ 			msg += 2;
+-		if (msg >= 0 && !(us->flags & US_FL_NEED_OVERRIDE))
++		if (msg >= 0 && !(us->fflags & US_FL_NEED_OVERRIDE))
+ 			printk(KERN_NOTICE USB_STORAGE "This device "
+ 				"(%04x,%04x,%04x S %02x P %02x)"
+ 				" has %s in unusual_devs.h (kernel"
+@@ -663,7 +658,7 @@ static int get_transport(struct us_data *us)
+ 	US_DEBUGP("Transport: %s\n", us->transport_name);
+ 
+ 	/* fix for single-lun devices */
+-	if (us->flags & US_FL_SINGLE_LUN)
++	if (us->fflags & US_FL_SINGLE_LUN)
+ 		us->max_lun = 0;
+ 	return 0;
+ }
+@@ -820,12 +815,11 @@ static void usb_stor_release_resources(struct us_data *us)
+ 	US_DEBUGP("-- %s\n", __func__);
+ 
+ 	/* Tell the control thread to exit.  The SCSI host must
+-	 * already have been removed so it won't try to queue
+-	 * any more commands.
++	 * already have been removed and the DISCONNECTING flag set
++	 * so that we won't accept any more commands.
+ 	 */
+ 	US_DEBUGP("-- sending exit command to thread\n");
+-	set_bit(US_FLIDX_DISCONNECTING, &us->flags);
+-	up(&us->sema);
++	complete(&us->cmnd_ready);
+ 	if (us->ctl_thread)
+ 		kthread_stop(us->ctl_thread);
+ 
+@@ -859,39 +853,36 @@ static void dissociate_dev(struct us_data *us)
+ 	usb_set_intfdata(us->pusb_intf, NULL);
+ }
+ 
+-/* First stage of disconnect processing: stop all commands and remove
+- * the host */
++/* First stage of disconnect processing: stop SCSI scanning,
++ * remove the host, and stop accepting new commands
++ */
+ static void quiesce_and_remove_host(struct us_data *us)
+ {
+ 	struct Scsi_Host *host = us_to_host(us);
+ 
+-	/* Prevent new USB transfers, stop the current command, and
+-	 * interrupt a SCSI-scan or device-reset delay */
+-	scsi_lock(host);
+-	set_bit(US_FLIDX_DISCONNECTING, &us->flags);
+-	scsi_unlock(host);
+-	usb_stor_stop_transport(us);
+-	wake_up(&us->delay_wait);
++	/* If the device is really gone, cut short reset delays */
++	if (us->pusb_dev->state == USB_STATE_NOTATTACHED)
++		set_bit(US_FLIDX_DISCONNECTING, &us->dflags);
+ 
+-	/* queuecommand won't accept any new commands and the control
+-	 * thread won't execute a previously-queued command.  If there
+-	 * is such a command pending, complete it with an error. */
+-	mutex_lock(&us->dev_mutex);
+-	if (us->srb) {
+-		us->srb->result = DID_NO_CONNECT << 16;
+-		scsi_lock(host);
+-		us->srb->scsi_done(us->srb);
+-		us->srb = NULL;
+-		complete(&us->notify);		/* in case of an abort */
+-		scsi_unlock(host);
+-	}
+-	mutex_unlock(&us->dev_mutex);
++	/* Prevent SCSI-scanning (if it hasn't started yet)
++	 * and wait for the SCSI-scanning thread to stop.
++	 */
++	set_bit(US_FLIDX_DONT_SCAN, &us->dflags);
++	wake_up(&us->delay_wait);
++	wait_for_completion(&us->scanning_done);
+ 
+-	/* Now we own no commands so it's safe to remove the SCSI host */
++	/* Removing the host will perform an orderly shutdown: caches
++	 * synchronized, disks spun down, etc.
++	 */
+ 	scsi_remove_host(host);
+ 
+-	/* Wait for the SCSI-scanning thread to stop */
+-	wait_for_completion(&us->scanning_done);
++	/* Prevent any new commands from being accepted and cut short
++	 * reset delays.
++	 */
++	scsi_lock(host);
++	set_bit(US_FLIDX_DISCONNECTING, &us->dflags);
++	scsi_unlock(host);
++	wake_up(&us->delay_wait);
+ }
+ 
+ /* Second stage of disconnect processing: deallocate all resources */
+@@ -919,16 +910,16 @@ static int usb_stor_scan_thread(void * __us)
+ 		printk(KERN_DEBUG "usb-storage: waiting for device "
+ 				"to settle before scanning\n");
+ 		wait_event_freezable_timeout(us->delay_wait,
+-				test_bit(US_FLIDX_DISCONNECTING, &us->flags),
++				test_bit(US_FLIDX_DONT_SCAN, &us->dflags),
+ 				delay_use * HZ);
+ 	}
+ 
+ 	/* If the device is still connected, perform the scanning */
+-	if (!test_bit(US_FLIDX_DISCONNECTING, &us->flags)) {
++	if (!test_bit(US_FLIDX_DONT_SCAN, &us->dflags)) {
+ 
+ 		/* For bulk-only devices, determine the max LUN value */
+ 		if (us->protocol == US_PR_BULK &&
+-				!(us->flags & US_FL_SINGLE_LUN)) {
++				!(us->fflags & US_FL_SINGLE_LUN)) {
+ 			mutex_lock(&us->dev_mutex);
+ 			us->max_lun = usb_stor_Bulk_max_lun(us);
+ 			mutex_unlock(&us->dev_mutex);
+@@ -975,7 +966,7 @@ static int storage_probe(struct usb_interface *intf,
+ 	us = host_to_us(host);
+ 	memset(us, 0, sizeof(struct us_data));
+ 	mutex_init(&(us->dev_mutex));
+-	init_MUTEX_LOCKED(&(us->sema));
++	init_completion(&us->cmnd_ready);
+ 	init_completion(&(us->notify));
+ 	init_waitqueue_head(&us->delay_wait);
+ 	init_completion(&us->scanning_done);
+@@ -1023,6 +1014,7 @@ static int storage_probe(struct usb_interface *intf,
+ 	if (IS_ERR(th)) {
+ 		printk(KERN_WARNING USB_STORAGE 
+ 		       "Unable to start the device-scanning thread\n");
++		complete(&us->scanning_done);
+ 		quiesce_and_remove_host(us);
+ 		result = PTR_ERR(th);
+ 		goto BadDevice;
+@@ -1065,6 +1057,7 @@ static struct usb_driver usb_storage_driver = {
+ 	.pre_reset =	storage_pre_reset,
+ 	.post_reset =	storage_post_reset,
+ 	.id_table =	storage_usb_ids,
++	.soft_unbind =	1,
+ };
+ 
+ static int __init usb_stor_init(void)
+diff --git a/drivers/usb/storage/usb.h b/drivers/usb/storage/usb.h
+index 8d87503..a4ad73b 100644
+--- a/drivers/usb/storage/usb.h
++++ b/drivers/usb/storage/usb.h
+@@ -1,8 +1,6 @@
+ /* Driver for USB Mass Storage compliant devices
+  * Main Header File
+  *
+- * $Id: usb.h,v 1.21 2002/04/21 02:57:59 mdharm Exp $
+- *
+  * Current development and maintenance by:
+  *   (c) 1999-2002 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+  *
+@@ -67,16 +65,14 @@ struct us_unusual_dev {
+ };
+ 
+ 
+-/* Dynamic flag definitions: used in set_bit() etc. */
+-#define US_FLIDX_URB_ACTIVE	18  /* 0x00040000  current_urb is in use  */
+-#define US_FLIDX_SG_ACTIVE	19  /* 0x00080000  current_sg is in use   */
+-#define US_FLIDX_ABORTING	20  /* 0x00100000  abort is in progress   */
+-#define US_FLIDX_DISCONNECTING	21  /* 0x00200000  disconnect in progress */
+-#define ABORTING_OR_DISCONNECTING	((1UL << US_FLIDX_ABORTING) | \
+-					 (1UL << US_FLIDX_DISCONNECTING))
+-#define US_FLIDX_RESETTING	22  /* 0x00400000  device reset in progress */
+-#define US_FLIDX_TIMED_OUT	23  /* 0x00800000  SCSI midlayer timed out  */
+-
++/* Dynamic bitflag definitions (us->dflags): used in set_bit() etc. */
++#define US_FLIDX_URB_ACTIVE	0	/* current_urb is in use    */
++#define US_FLIDX_SG_ACTIVE	1	/* current_sg is in use     */
++#define US_FLIDX_ABORTING	2	/* abort is in progress     */
++#define US_FLIDX_DISCONNECTING	3	/* disconnect in progress   */
++#define US_FLIDX_RESETTING	4	/* device reset in progress */
++#define US_FLIDX_TIMED_OUT	5	/* SCSI midlayer timed out  */
++#define US_FLIDX_DONT_SCAN	6	/* don't scan (disconnect)  */
+ 
+ #define USB_STOR_STRING_LEN 32
+ 
+@@ -109,7 +105,8 @@ struct us_data {
+ 	struct usb_device	*pusb_dev;	 /* this usb_device */
+ 	struct usb_interface	*pusb_intf;	 /* this interface */
+ 	struct us_unusual_dev   *unusual_dev;	 /* device-filter entry     */
+-	unsigned long		flags;		 /* from filter initially */
++	unsigned long		fflags;		 /* fixed flags from filter */
++	unsigned long		dflags;		 /* dynamic atomic bitflags */
+ 	unsigned int		send_bulk_pipe;	 /* cached pipe values */
+ 	unsigned int		recv_bulk_pipe;
+ 	unsigned int		send_ctrl_pipe;
+@@ -147,7 +144,7 @@ struct us_data {
+ 	struct task_struct	*ctl_thread;	 /* the control thread   */
+ 
+ 	/* mutual exclusion and synchronization structures */
+-	struct semaphore	sema;		 /* to sleep thread on	    */
++	struct completion	cmnd_ready;	 /* to sleep thread on	    */
+ 	struct completion	notify;		 /* thread begin/end	    */
+ 	wait_queue_head_t	delay_wait;	 /* wait during scan, reset */
+ 	struct completion	scanning_done;	 /* wait for scan thread    */
+diff --git a/include/asm-arm/arch-omap/hdrc_cnf.h b/include/asm-arm/arch-omap/hdrc_cnf.h
+deleted file mode 100644
+index 74c8432..0000000
+--- a/include/asm-arm/arch-omap/hdrc_cnf.h
++++ /dev/null
+@@ -1,177 +0,0 @@
+-/*
+- * Copyright 2005 Mentor Graphics Corporation
+- * USB High-Speed Multi-Point Dual-Role Controller Configuration
+- *
+- * Copyright Mentor Graphics Corporation and Licensors 2004
+- * Copyright (C) 2005 by Texas Instruments
+- *
+- * This file contains configuration constants for the (m)hdrc
+- * silicon as integrated into DaVinci CPUs.
+- */
+-
+-#ifndef	__ARCH_MUSB_HDRC_CNF
+-#define	__ARCH_MUSB_HDRC_CNF
+-
+-/* ** Number of Tx endpoints ** */
+-/* Legal values are 1 - 16 (this value includes EP0) */
+-#define MUSB_C_NUM_EPT 8
+-
+-/* ** Number of Rx endpoints ** */
+-/* Legal values are 1 - 16 (this value includes EP0) */
+-#define MUSB_C_NUM_EPR 8
+-
+-/* ** Endpoint 1 to 15 direction types ** */
+-/* C_EP1_DEF is defined if either Tx endpoint 1 or Rx endpoint 1 are used */
+-#define MUSB_C_EP1_DEF
+-
+-/* C_EP1_TX_DEF is defined if Tx endpoint 1 is used */
+-#define MUSB_C_EP1_TX_DEF
+-
+-/* C_EP1_RX_DEF is defined if Rx endpoint 1 is used */
+-#define MUSB_C_EP1_RX_DEF
+-
+-/* C_EP1_TOR_DEF is defined if Tx endpoint 1 and Rx endpoint 1 share a FIFO */
+-/*`define C_EP1_TOR_DEF */
+-
+-/* C_EP1_TAR_DEF is defined if both Tx endpoint 1 and Rx endpoint 1 are used */
+-/* and do not share a FIFO */
+-#define MUSB_C_EP1_TAR_DEF
+-
+-/* Similarly for all other used endpoints */
+-#define MUSB_C_EP2_DEF
+-#define MUSB_C_EP2_TX_DEF
+-#define MUSB_C_EP2_RX_DEF
+-#define MUSB_C_EP2_TAR_DEF
+-#define MUSB_C_EP3_DEF
+-#define MUSB_C_EP3_TX_DEF
+-#define MUSB_C_EP3_RX_DEF
+-#define MUSB_C_EP3_TAR_DEF
+-#define MUSB_C_EP4_DEF
+-#define MUSB_C_EP4_TX_DEF
+-#define MUSB_C_EP4_RX_DEF
+-#define MUSB_C_EP4_TAR_DEF
+-#define MUSB_C_EP5_DEF
+-#define MUSB_C_EP5_TX_DEF
+-#define MUSB_C_EP5_RX_DEF
+-#define MUSB_C_EP5_TAR_DEF
+-#define MUSB_C_EP6_DEF
+-#define MUSB_C_EP6_TX_DEF
+-#define MUSB_C_EP6_RX_DEF
+-#define MUSB_C_EP6_TAR_DEF
+-#define MUSB_C_EP7_DEF
+-#define MUSB_C_EP7_TX_DEF
+-#define MUSB_C_EP7_RX_DEF
+-#define MUSB_C_EP7_TAR_DEF
+-
+-/* ** Endpoint 1 to 15 FIFO address bits ** */
+-/* Legal values are 3 to 13 - corresponding to FIFO sizes of 8 to 8192 bytes. */
+-/* If an Tx endpoint shares a FIFO with an Rx endpoint then the Rx FIFO size */
+-/* must be the same as the Tx FIFO size. */
+-/* All endpoints 1 to 15 must be defined, unused endpoints should be set to 2. */
+-#define MUSB_C_EP1T_BITS 10
+-#define MUSB_C_EP1R_BITS 10
+-#define MUSB_C_EP2T_BITS 9
+-#define MUSB_C_EP2R_BITS 9
+-#define MUSB_C_EP3T_BITS 3
+-#define MUSB_C_EP3R_BITS 3
+-#define MUSB_C_EP4T_BITS 3
+-#define MUSB_C_EP4R_BITS 3
+-#define MUSB_C_EP5T_BITS 3
+-#define MUSB_C_EP5R_BITS 3
+-#define MUSB_C_EP6T_BITS 3
+-#define MUSB_C_EP6R_BITS 3
+-#define MUSB_C_EP7T_BITS 3
+-#define MUSB_C_EP7R_BITS 3
+-#define MUSB_C_EP8T_BITS 2
+-#define MUSB_C_EP8R_BITS 2
+-#define MUSB_C_EP9T_BITS 2
+-#define MUSB_C_EP9R_BITS 2
+-#define MUSB_C_EP10T_BITS 2
+-#define MUSB_C_EP10R_BITS 2
+-#define MUSB_C_EP11T_BITS 2
+-#define MUSB_C_EP11R_BITS 2
+-#define MUSB_C_EP12T_BITS 2
+-#define MUSB_C_EP12R_BITS 2
+-#define MUSB_C_EP13T_BITS 2
+-#define MUSB_C_EP13R_BITS 2
+-#define MUSB_C_EP14T_BITS 2
+-#define MUSB_C_EP14R_BITS 2
+-#define MUSB_C_EP15T_BITS 2
+-#define MUSB_C_EP15R_BITS 2
+-
+-/* Define the following constant if the USB2.0 Transceiver Macrocell data width is 16-bits. */
+-/* `define C_UTM_16 */
+-
+-/* Define this constant if the CPU uses big-endian byte ordering. */
+-/*`define C_BIGEND */
+-
+-/* Define the following constant if any Tx endpoint is required to support multiple bulk packets. */
+-/* `define C_MP_TX */
+-
+-/* Define the following constant if any Rx endpoint is required to support multiple bulk packets. */
+-/* `define C_MP_RX */
+-
+-/* Define the following constant if any Tx endpoint is required to support high bandwidth ISO. */
+-/* `define C_HB_TX */
+-
+-/* Define the following constant if any Rx endpoint is required to support high bandwidth ISO. */
+-/* `define C_HB_RX */
+-
+-/* Define the following constant if software connect/disconnect control is required. */
+-#define MUSB_C_SOFT_CON
+-
+-/* Define the following constant if Vendor Control Registers are required. */
+-/* `define C_VEND_REG */
+-
+-/* Vendor control register widths. */
+-#define MUSB_C_VCTL_BITS 4
+-#define MUSB_C_VSTAT_BITS 8
+-
+-
+-/* Define the following constant to include a DMA controller. */
+-#define MUSB_C_DMA
+-
+-/* Define the following constant if 2 or more DMA channels are required. */
+-#define MUSB_C_DMA2
+-
+-/* Define the following constant if 3 or more DMA channels are required. */
+-#define MUSB_C_DMA3
+-
+-/* Define the following constant if 4 or more DMA channels are required. */
+-#define MUSB_C_DMA4
+-
+-/* Define the following constant if 5 or more DMA channels are required. */
+-/*`define C_DMA5 */
+-
+-/* Define the following constant if 6 or more DMA channels are required. */
+-/*`define C_DMA6 */
+-
+-/* Define the following constant if 7 or more DMA channels are required. */
+-/*`define C_DMA7 */
+-
+-/* Define the following constant if 8 or more DMA channels are required. */
+-/*`define C_DMA8 */
+-
+-
+-/* ** Enable Dynamic FIFO Sizing ** */
+-#define MUSB_C_DYNFIFO_DEF
+-
+-/* ** Derived constants ** */
+-/* The following constants are derived from the previous configuration constants */
+-
+-/* Total number of endpoints
+- * Legal values are 2 - 16
+- * This must be equal to the larger of C_NUM_EPT, C_NUM_EPR
+- */
+-#define MUSB_C_NUM_EPS 8
+-
+-/* C_EPMAX_BITS is equal to the largest endpoint FIFO word address bits */
+-#define MUSB_C_EPMAX_BITS 12
+-
+-/* C_RAM_BITS is the number of address bits required to address the RAM (32-bit
+- * addresses).  It is defined as log2 of the sum of 2** of all the endpoint FIFO
+- * dword address bits (rounded up).
+- */
+-#define MUSB_C_RAM_BITS 12
+-
+-#endif	/* __ARCH_MUSB_HDRC_CNF */
+diff --git a/include/linux/usb.h b/include/linux/usb.h
+index c08689e..766d0cb 100644
+--- a/include/linux/usb.h
++++ b/include/linux/usb.h
+@@ -1012,6 +1012,7 @@ struct usb_driver {
+ 	struct usbdrv_wrap drvwrap;
+ 	unsigned int no_dynamic_id:1;
+ 	unsigned int supports_autosuspend:1;
++	unsigned int soft_unbind:1;
+ };
+ #define	to_usb_driver(d) container_of(d, struct usb_driver, drvwrap.driver)
+ 
+diff --git a/include/linux/usb/musb.h b/include/linux/usb/musb.h
+index d325a0d..630962c 100644
+--- a/include/linux/usb/musb.h
++++ b/include/linux/usb/musb.h
+@@ -19,6 +19,36 @@ enum musb_mode {
+ 
+ struct clk;
+ 
++struct musb_hdrc_eps_bits {
++	const char	name[16];
++	u8		bits;
++};
++
++struct musb_hdrc_config {
++	/* MUSB configuration-specific details */
++	unsigned	multipoint:1;	/* multipoint device */
++	unsigned	dyn_fifo:1;	/* supports dynamic fifo sizing */
++	unsigned	soft_con:1;	/* soft connect required */
++	unsigned	utm_16:1;	/* utm data witdh is 16 bits */
++	unsigned	big_endian:1;	/* true if CPU uses big-endian */
++	unsigned	mult_bulk_tx:1;	/* Tx ep required for multbulk pkts */
++	unsigned	mult_bulk_rx:1;	/* Rx ep required for multbulk pkts */
++	unsigned	high_iso_tx:1;	/* Tx ep required for HB iso */
++	unsigned	high_iso_rx:1;	/* Rx ep required for HD iso */
++	unsigned	dma:1;		/* supports DMA */
++	unsigned	vendor_req:1;	/* vendor registers required */
++
++	u8		num_eps;	/* number of endpoints _with_ ep0 */
++	u8		dma_channels;	/* number of dma channels */
++	u8		dyn_fifo_size;	/* dynamic size in bytes */
++	u8		vendor_ctrl;	/* vendor control reg width */
++	u8		vendor_stat;	/* vendor status reg witdh */
++	u8		dma_req_chan;	/* bitmask for required dma channels */
++	u8		ram_bits;	/* ram address size */
++
++	struct musb_hdrc_eps_bits *eps_bits;
++};
++
+ struct musb_hdrc_platform_data {
+ 	/* MUSB_HOST, MUSB_PERIPHERAL, or MUSB_OTG */
+ 	u8		mode;
+@@ -38,16 +68,14 @@ struct musb_hdrc_platform_data {
+ 	/* (HOST or OTG) msec/2 after VBUS on till power good */
+ 	u8		potpgt;
+ 
+-	/* TBD:  chip defaults should probably go someplace else,
+-	 * e.g. number of tx/rx endpoints, etc
+-	 */
+-	unsigned	multipoint:1;
+-
+ 	/* Power the device on or off */
+ 	int		(*set_power)(int state);
+ 
+ 	/* Turn device clock on or off */
+ 	int		(*set_clock)(struct clk *clock, int is_on);
++
++	/* MUSB configuration-specific details */
++	struct musb_hdrc_config	*config;
+ };
+ 
+ 
+-- 
+1.5.6
+

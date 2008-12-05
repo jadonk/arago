@@ -1,0 +1,27 @@
+From 07081d555a41ecb53fa72772ad6b7123ec5c7c3a Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Fri, 5 Sep 2008 13:55:27 +0530
+Subject: [PATCH 12/24] OMAP35x : Workaround for video crash  issue.
+
+This workaround prevents video clock reference count
+from dropping to zero.Needs further re-look for proper
+solution.
+---
+ drivers/media/video/omap/omap_vout.c |    1 +
+ 1 files changed, 1 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/media/video/omap/omap_vout.c b/drivers/media/video/omap/omap_vout.c
+index 17f9e76..191435c 100644
+--- a/drivers/media/video/omap/omap_vout.c
++++ b/drivers/media/video/omap/omap_vout.c
+@@ -3418,6 +3418,7 @@ rotation_free:
+ static int __init omap_vout_init(void)
+ {
+ 	omap_disp_get_dss();
++	omap_disp_get_dss();
+ 	saved_v1out = omap_vout_init_device(OMAP_VIDEO1);
+ 	if (saved_v1out == NULL) {
+ 		omap_disp_put_dss();
+-- 
+1.5.6
+

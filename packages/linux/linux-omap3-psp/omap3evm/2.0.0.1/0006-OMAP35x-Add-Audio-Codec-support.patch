@@ -1,0 +1,6140 @@
+From cb5292aa1eb42693e24e31cad6c72206b5ef35d4 Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Fri, 5 Sep 2008 12:52:58 +0530
+Subject: [PATCH 06/24] OMAP35x : Add Audio Codec support
+
+Add support for ALSA audio driver for the TWL4030 codec
+---
+ arch/arm/configs/omap3_evm_defconfig     |    5 +-
+ arch/arm/mach-omap2/mcbsp.c              |  914 +++++++++++++-
+ arch/arm/plat-omap/mcbsp.c               |   13 +-
+ include/asm-arm/arch-omap/mcbsp.h        |  220 +++-
+ include/asm-arm/arch-omap/omap-alsa.h    |    7 +-
+ sound/arm/Kconfig                        |    5 +
+ sound/arm/omap/Makefile                  |    4 +
+ sound/arm/omap/omap-alsa-dma.c           |    8 +-
+ sound/arm/omap/omap-alsa-dma.h           |   16 +-
+ sound/arm/omap/omap-alsa-twl4030-mixer.c | 1040 +++++++++++++++
+ sound/arm/omap/omap-alsa-twl4030.c       | 2105 ++++++++++++++++++++++++++++++
+ sound/arm/omap/omap-alsa-twl4030.h       |  976 ++++++++++++++
+ sound/arm/omap/omap-alsa.c               |   70 +-
+ sound/arm/omap/omap3-alsa-dma.c          |  292 +++++
+ 14 files changed, 5624 insertions(+), 51 deletions(-)
+ create mode 100644 sound/arm/omap/omap-alsa-twl4030-mixer.c
+ create mode 100644 sound/arm/omap/omap-alsa-twl4030.c
+ create mode 100644 sound/arm/omap/omap-alsa-twl4030.h
+ create mode 100644 sound/arm/omap/omap3-alsa-dma.c
+
+diff --git a/arch/arm/configs/omap3_evm_defconfig b/arch/arm/configs/omap3_evm_defconfig
+index 44ea920..20dc574 100644
+--- a/arch/arm/configs/omap3_evm_defconfig
++++ b/arch/arm/configs/omap3_evm_defconfig
+@@ -179,7 +179,7 @@ CONFIG_OMAP_BOOT_REASON=y
+ # CONFIG_OMAP_COMPONENT_VERSION is not set
+ # CONFIG_OMAP_GPIO_SWITCH is not set
+ # CONFIG_OMAP_MUX is not set
+-# CONFIG_OMAP_MCBSP is not set
++CONFIG_OMAP_MCBSP=y
+ # CONFIG_OMAP_MMU_FWK is not set
+ # CONFIG_OMAP_MBOX_FWK is not set
+ # CONFIG_OMAP_MPU_TIMER is not set
+@@ -922,7 +922,7 @@ CONFIG_SND_TIMER=y
+ CONFIG_SND_PCM=y
+ CONFIG_SND_HWDEP=y
+ CONFIG_SND_RAWMIDI=y
+-# CONFIG_SND_SEQUENCER is not set
+++# CONFIG_SND_SEQUENCER is not set
+ CONFIG_SND_OSSEMUL=y
+ CONFIG_SND_MIXER_OSS=y
+ CONFIG_SND_PCM_OSS=y
+@@ -949,6 +949,7 @@ CONFIG_SND_VERBOSE_PROCFS=y
+ # CONFIG_SND_SX1 is not set
+ # CONFIG_SND_OMAP_TSC2102 is not set
+ # CONFIG_SND_OMAP24XX_EAC is not set
++CONFIG_SND_OMAP3_TWL4030=y
+ 
+ #
+ # SPI devices
+diff --git a/arch/arm/mach-omap2/mcbsp.c b/arch/arm/mach-omap2/mcbsp.c
+index 36d0e91..1359a7d 100644
+--- a/arch/arm/mach-omap2/mcbsp.c
++++ b/arch/arm/mach-omap2/mcbsp.c
+@@ -16,12 +16,15 @@
+ #include <linux/err.h>
+ #include <linux/io.h>
+ #include <linux/platform_device.h>
++#include <linux/delay.h>
++#include <linux/interrupt.h>
+ 
+ #include <asm/arch/dma.h>
+ #include <asm/arch/mux.h>
+ #include <asm/arch/cpu.h>
+ #include <asm/arch/mcbsp.h>
+ 
++struct omap_mcbsp_reg_cfg mcbsp_cfg = {0};
+ struct mcbsp_internal_clk {
+ 	struct clk clk;
+ 	struct clk **childs;
+@@ -91,7 +94,7 @@ static struct mcbsp_internal_clk omap_mcbsp_clks[] = {
+ 	},
+ 	{
+ 		.clk = {
+-			.name		= "mcbsp_clk",
++			.name 		= "mcbsp_clk",
+ 			.id		= 3,
+ 			.enable		= omap_mcbsp_clk_enable,
+ 			.disable	= omap_mcbsp_clk_disable,
+@@ -99,7 +102,7 @@ static struct mcbsp_internal_clk omap_mcbsp_clks[] = {
+ 	},
+ 	{
+ 		.clk = {
+-			.name		= "mcbsp_clk",
++			.name 		= "mcbsp_clk",
+ 			.id		= 4,
+ 			.enable		= omap_mcbsp_clk_enable,
+ 			.disable	= omap_mcbsp_clk_disable,
+@@ -107,7 +110,7 @@ static struct mcbsp_internal_clk omap_mcbsp_clks[] = {
+ 	},
+ 	{
+ 		.clk = {
+-			.name		= "mcbsp_clk",
++			.name 		= "mcbsp_clk",
+ 			.id		= 5,
+ 			.enable		= omap_mcbsp_clk_enable,
+ 			.disable	= omap_mcbsp_clk_disable,
+@@ -141,9 +144,909 @@ static void omap2_mcbsp_request(unsigned int id)
+ 		omap2_mcbsp2_mux_setup();
+ }
+ 
++/*
++ * mcbsp power settings
++ * mcbsp_id	: McBSP interface number
++ * level	: power settings level
++ */
++static void  mcbsp_power_settings(unsigned int id, int level)
++{
++	struct omap_mcbsp *mcbsp;
++	u32 io_base;
++	mcbsp = id_to_mcbsp_ptr(id);
++	io_base = mcbsp->io_base;
++
++	if (level == MCBSP2_SYSCONFIG_LVL1)
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SYSCON,
++		CLOCKACTIVITY(MCBSP_SYSC_IOFF_FON) | SIDLEMODE(SMART_IDLE) |
++								ENAWAKEUP);
++
++	if (level == MCBSP2_SYSCONFIG_LVL2)
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SYSCON,
++		CLOCKACTIVITY(MCBSP_SYSC_IOFF_FOFF) | SIDLEMODE(FORCE_IDLE));
++}
++
++static void omap2_mcbsp_free(unsigned int id)
++{
++	struct omap_mcbsp *mcbsp = mcbsp_ptr[id];
++	if (!cpu_is_omap2420()) {
++		if (mcbsp->dma_rx_lch != -1) {
++			omap_free_dma_chain(mcbsp->dma_rx_lch);
++			 mcbsp->dma_rx_lch = -1;
++		}
++
++		if (mcbsp->dma_tx_lch != -1) {
++			omap_free_dma_chain(mcbsp->dma_tx_lch);
++			mcbsp->dma_tx_lch = -1;
++		}
++	mcbsp_power_settings(id, MCBSP2_SYSCONFIG_LVL2);
++	}
++	return;
++}
++void omap2_mcbsp_config(unsigned int id,
++			 const struct omap_mcbsp_reg_cfg *config)
++{
++	struct omap_mcbsp *mcbsp;
++	u32 io_base;
++	mcbsp = id_to_mcbsp_ptr(id);
++	io_base = mcbsp->io_base;
++	omap_mcbsp_write(io_base, OMAP_MCBSP_REG_XCCR, config->xccr);
++	omap_mcbsp_write(io_base, OMAP_MCBSP_REG_RCCR, config->rccr);
++}
+ static struct omap_mcbsp_ops omap2_mcbsp_ops = {
+ 	.request	= omap2_mcbsp_request,
++	.free 		= omap2_mcbsp_free,
++	.config		= omap2_mcbsp_config,
+ };
++static void omap2_mcbsp_rx_dma_callback(int lch, u16 ch_status, void *data)
++{
++	struct omap_mcbsp *mcbsp_dma_rx = data;
++	u32 io_base;
++	io_base = mcbsp_dma_rx->io_base;
++
++	/* If we are at the last transfer, Shut down the reciever */
++	if ((mcbsp_dma_rx->auto_reset & OMAP_MCBSP_AUTO_RRST)
++		&& (omap_dma_chain_status(mcbsp_dma_rx->dma_rx_lch) ==
++						 OMAP_DMA_CHAIN_INACTIVE))
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR1,
++			omap_mcbsp_read(io_base,
++					 OMAP_MCBSP_REG_SPCR1) & (~RRST));
++
++	if (mcbsp_dma_rx->rx_callback != NULL)
++		mcbsp_dma_rx->rx_callback(ch_status, mcbsp_dma_rx->rx_cb_arg);
++
++}
++
++static void omap2_mcbsp_tx_dma_callback(int lch, u16 ch_status, void *data)
++{
++	struct omap_mcbsp *mcbsp_dma_tx = data;
++	u32 io_base;
++	io_base = mcbsp_dma_tx->io_base;
++
++	/* If we are at the last transfer, Shut down the Transmitter */
++	if ((mcbsp_dma_tx->auto_reset & OMAP_MCBSP_AUTO_XRST)
++		&& (omap_dma_chain_status(mcbsp_dma_tx->dma_tx_lch) ==
++						 OMAP_DMA_CHAIN_INACTIVE))
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR2,
++			omap_mcbsp_read(io_base,
++					 OMAP_MCBSP_REG_SPCR2) & (~XRST));
++
++	if (mcbsp_dma_tx->tx_callback != NULL)
++		mcbsp_dma_tx->tx_callback(ch_status, mcbsp_dma_tx->tx_cb_arg);
++}
++
++/*
++ * Set McBSP recv parameters
++ * id           : McBSP interface ID
++ * mcbsp_cfg    : McBSP register configuration
++ * rp           : McBSP recv parameters
++ */
++void omap2_mcbsp_set_recv_param(unsigned int id,
++				struct omap_mcbsp_reg_cfg *mcbsp_cfg,
++				struct omap_mcbsp_cfg_param *rp)
++{
++	mcbsp_cfg->spcr1 = RJUST(rp->justification);
++	mcbsp_cfg->rcr2 = RCOMPAND(rp->reverse_compand) |
++				RDATDLY(rp->data_delay);
++	if (rp->phase == OMAP_MCBSP_FRAME_SINGLEPHASE)
++		mcbsp_cfg->rcr2 = mcbsp_cfg->rcr2 & ~(RPHASE);
++	else
++		mcbsp_cfg->rcr2 = mcbsp_cfg->rcr2  | (RPHASE) |
++			RWDLEN2(rp->word_length2) | RFRLEN2(rp->frame_length2);
++	mcbsp_cfg->rcr1 = RWDLEN1(rp->word_length1) |
++				RFRLEN1(rp->frame_length1);
++	if (rp->fsync_src == OMAP_MCBSP_RXFSYNC_INTERNAL)
++		mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0 | FSRM;
++	if (rp->clk_mode == OMAP_MCBSP_CLKRXSRC_INTERNAL)
++		mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0 | CLKRM;
++	if (rp->clk_polarity == OMAP_MCBSP_CLKR_POLARITY_RISING)
++		mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0 | CLKRP;
++	if (rp->fs_polarity == OMAP_MCBSP_FS_ACTIVE_LOW)
++		mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0 | FSRP;
++	return;
++}
++
++/*
++ * Set McBSP transmit parameters
++ * id		: McBSP interface ID
++ * mcbsp_cfg	: McBSP register configuration
++ * tp		: McBSP transmit parameters
++ */
++
++void omap2_mcbsp_set_trans_param(unsigned int id,
++				struct omap_mcbsp_reg_cfg *mcbsp_cfg,
++				struct omap_mcbsp_cfg_param *tp)
++{
++	mcbsp_cfg->xcr2 = XCOMPAND(tp->reverse_compand) |
++					XDATDLY(tp->data_delay);
++	if (tp->phase == OMAP_MCBSP_FRAME_SINGLEPHASE)
++		mcbsp_cfg->xcr2 = mcbsp_cfg->xcr2 & ~(XPHASE);
++	else
++		mcbsp_cfg->xcr2 = mcbsp_cfg->xcr2 | (XPHASE) |
++			RWDLEN2(tp->word_length2) | RFRLEN2(tp->frame_length2);
++	mcbsp_cfg->xcr1 = XWDLEN1(tp->word_length1) |
++				XFRLEN1(tp->frame_length1);
++	if (tp->fs_polarity == OMAP_MCBSP_FS_ACTIVE_LOW)
++		mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0 | FSXP;
++	if (tp->fsync_src == OMAP_MCBSP_TXFSYNC_INTERNAL)
++		mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0 | FSXM;
++	if (tp->clk_mode == OMAP_MCBSP_CLKTXSRC_INTERNAL)
++		mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0 | CLKXM;
++	if (tp->clk_polarity == OMAP_MCBSP_CLKX_POLARITY_FALLING)
++		mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0 | CLKXP;
++	return;
++}
++
++ /*
++  * Set McBSP SRG configuration
++  * id			: McBSP interface ID
++  * mcbsp_cfg		: McBSP register configuration
++  * interface_mode	: Master/Slave
++  * param		: McBSP SRG and FSG configuration
++  */
++
++void omap2_mcbsp_set_srg_cfg_param(unsigned int id, int interface_mode,
++					struct omap_mcbsp_reg_cfg *mcbsp_cfg,
++					struct omap_mcbsp_srg_fsg_cfg *param)
++{
++	struct omap_mcbsp *mcbsp = mcbsp_ptr[id];
++	u32 io_base;
++	u32 clk_rate, clkgdv;
++	io_base = mcbsp->io_base;
++
++	mcbsp->interface_mode = interface_mode;
++	mcbsp_cfg->srgr1 = FWID(param->pulse_width);
++
++	if (interface_mode == OMAP_MCBSP_MASTER) {
++		/* clk_rate = clk_get_rate(omap_mcbsp_clk[id].fck); */
++		clk_rate = 96000000;
++		clkgdv = clk_rate / (param->sample_rate *
++				(param->bits_per_sample - 1));
++		mcbsp_cfg->srgr1 = mcbsp_cfg->srgr1 | CLKGDV(clkgdv);
++	}
++	if (param->dlb)
++		mcbsp_cfg->spcr1 = mcbsp_cfg->spcr1 & ~(ALB);
++
++	if (param->sync_mode == OMAP_MCBSP_SRG_FREERUNNING)
++		mcbsp_cfg->spcr2 = mcbsp_cfg->spcr2 | FREE;
++	mcbsp_cfg->srgr2 = FPER(param->period)|(param->fsgm? FSGM : 0);
++
++	switch (param->srg_src) {
++
++	case OMAP_MCBSP_SRGCLKSRC_CLKS:
++		mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0 & ~(SCLKME);
++		mcbsp_cfg->srgr2 = mcbsp_cfg->srgr2 & ~(CLKSM);
++		/*
++		 * McBSP master operation at low voltage is only possible if
++		 * CLKSP=0 In Master mode, if client driver tries to configiure
++		 * input clock polarity as falling edge, we force it to Rising
++		 */
++
++		if ((param->polarity == OMAP_MCBSP_CLKS_POLARITY_RISING) ||
++					(interface_mode == OMAP_MCBSP_MASTER))
++			mcbsp_cfg->srgr2 = mcbsp_cfg->srgr2  & ~(CLKSP);
++		else
++			mcbsp_cfg->srgr2 = mcbsp_cfg->srgr2  |  (CLKSP);
++		break;
++
++
++	case OMAP_MCBSP_SRGCLKSRC_FCLK:
++		mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0 & ~(SCLKME);
++		mcbsp_cfg->srgr2 = mcbsp_cfg->srgr2 | (CLKSM);
++
++		break;
++
++	case OMAP_MCBSP_SRGCLKSRC_CLKR:
++		mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0   | (SCLKME);
++		mcbsp_cfg->srgr2 = mcbsp_cfg->srgr2 & ~(CLKSM);
++		if (param->polarity == OMAP_MCBSP_CLKR_POLARITY_FALLING)
++			mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0  & ~(CLKRP);
++		else
++			mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0  | (CLKRP);
++
++		break;
++
++	case OMAP_MCBSP_SRGCLKSRC_CLKX:
++		mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0   | (SCLKME);
++		mcbsp_cfg->srgr2 = mcbsp_cfg->srgr2 | (CLKSM);
++
++		if (param->polarity == OMAP_MCBSP_CLKX_POLARITY_RISING)
++			mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0  & ~(CLKXP);
++		else
++			mcbsp_cfg->pcr0 = mcbsp_cfg->pcr0  | (CLKXP);
++		break;
++
++	}
++	if (param->sync_mode == OMAP_MCBSP_SRG_FREERUNNING)
++		mcbsp_cfg->srgr2 = mcbsp_cfg->srgr2 & ~(GSYNC);
++	else if (param->sync_mode == OMAP_MCBSP_SRG_RUNNING)
++		mcbsp_cfg->srgr2 = mcbsp_cfg->srgr2 | (GSYNC);
++
++	mcbsp_cfg->xccr = omap_mcbsp_read(io_base, OMAP_MCBSP_REG_XCCR);
++	if (param->dlb)
++		mcbsp_cfg->xccr = mcbsp_cfg->xccr | (DILB);
++	mcbsp_cfg->rccr = omap_mcbsp_read(io_base, OMAP_MCBSP_REG_RCCR);
++
++	return;
++}
++
++
++/*
++ * configure the McBSP registers
++ * id			: McBSP interface ID
++ * interface_mode	: Master/Slave
++ * rp			: McBSP recv parameters
++ * tp			: McBSP transmit parameters
++ * param		: McBSP SRG and FSG configuration
++ */
++int omap2_mcbsp_params_cfg(unsigned int id, int interface_mode,
++				struct omap_mcbsp_cfg_param *rp,
++				struct omap_mcbsp_cfg_param *tp,
++				struct omap_mcbsp_srg_fsg_cfg *param)
++{
++	if (rp)
++		omap2_mcbsp_set_recv_param(id, &mcbsp_cfg, rp);
++	if (tp)
++		omap2_mcbsp_set_trans_param(id, &mcbsp_cfg, tp);
++	if (param)
++		omap2_mcbsp_set_srg_cfg_param(id,
++					interface_mode, &mcbsp_cfg, param);
++	omap_mcbsp_config(id, &mcbsp_cfg);
++
++	return 0;
++}
++EXPORT_SYMBOL(omap2_mcbsp_params_cfg);
++
++/*
++ * Enable/Disable the sample rate generator
++ * id		: McBSP interface ID
++ * state	: Enable/Disable
++ */
++void omap2_mcbsp_set_srg_fsg(unsigned int id, u8 state)
++{
++	struct omap_mcbsp *mcbsp = mcbsp_ptr[id];
++	u32 io_base;
++
++	io_base = mcbsp->io_base;
++
++	if (state == OMAP_MCBSP_DISABLE_FSG_SRG) {
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR2,
++			omap_mcbsp_read(io_base,
++					 OMAP_MCBSP_REG_SPCR2) & (~GRST));
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR2,
++			omap_mcbsp_read(io_base,
++					 OMAP_MCBSP_REG_SPCR2) & (~FRST));
++	} else {
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR2,
++			omap_mcbsp_read(io_base, OMAP_MCBSP_REG_SPCR2) | GRST);
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR2,
++			omap_mcbsp_read(io_base, OMAP_MCBSP_REG_SPCR2) | FRST);
++	}
++	return;
++}
++
++/*
++ * Stop transmitting data on a McBSP interface
++ * id		: McBSP interface ID
++ */
++int omap2_mcbsp_stop_datatx(unsigned int id)
++{
++	struct omap_mcbsp *mcbsp = mcbsp_ptr[id];
++	u32 io_base;
++
++	if (!omap_mcbsp_check_valid_id(id)) {
++		printk(KERN_ERR "%s: Invalid id (%d)\n", __func__, id + 1);
++		return -ENODEV;
++	}
++
++	io_base = mcbsp->io_base;
++
++	if (mcbsp->dma_tx_lch != -1) {
++		if (omap_stop_dma_chain_transfers(mcbsp->dma_tx_lch) != 0)
++			return -EINVAL;
++	}
++	mcbsp->tx_dma_chain_state = 0;
++	omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR2,
++		omap_mcbsp_read(io_base, OMAP_MCBSP_REG_SPCR2) & (~XRST));
++
++	if (!mcbsp->rx_dma_chain_state)
++		omap2_mcbsp_set_srg_fsg(id, OMAP_MCBSP_DISABLE_FSG_SRG);
++
++	return 0;
++}
++EXPORT_SYMBOL(omap2_mcbsp_stop_datatx);
++
++/*
++ * Stop receving data on a McBSP interface
++ * id		: McBSP interface ID
++ */
++int omap2_mcbsp_stop_datarx(u32 id)
++{
++	struct omap_mcbsp *mcbsp = mcbsp_ptr[id];
++	u32 io_base;
++
++	if (!omap_mcbsp_check_valid_id(id)) {
++		printk(KERN_ERR "%s: Invalid id (%d)\n", __func__, id + 1);
++		return -ENODEV;
++	}
++
++	io_base = mcbsp->io_base;
++
++	if (mcbsp->dma_rx_lch != -1) {
++		if (omap_stop_dma_chain_transfers(mcbsp->dma_rx_lch) != 0)
++			return -EINVAL;
++	}
++	omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR1,
++		omap_mcbsp_read(io_base, OMAP_MCBSP_REG_SPCR1) & (~RRST));
++
++	mcbsp->rx_dma_chain_state = 0;
++	if (!mcbsp->tx_dma_chain_state)
++		omap2_mcbsp_set_srg_fsg(id, OMAP_MCBSP_DISABLE_FSG_SRG);
++
++	return 0;
++}
++EXPORT_SYMBOL(omap2_mcbsp_stop_datarx);
++
++/*
++ * Interface Reset
++ * id	: McBSP interface ID
++ * Resets the McBSP interface
++ */
++int omap2_mcbsp_reset(unsigned int id)
++{
++	struct omap_mcbsp *mcbsp = mcbsp_ptr[id];
++	u32 io_base;
++	int counter = 0;
++	int wait_for_reset = 10000;
++
++	if (!omap_mcbsp_check_valid_id(id)) {
++		printk(KERN_ERR "%s: Invalid id (%d)\n", __func__, id + 1);
++		return -ENODEV;
++	}
++
++	io_base = mcbsp->io_base;
++
++	omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SYSCON,
++		omap_mcbsp_read(io_base, OMAP_MCBSP_REG_SYSCON) | (SOFTRST));
++
++	while (omap_mcbsp_read(io_base, OMAP_MCBSP_REG_SYSCON) & SOFTRST) {
++		if (!in_interrupt()) {
++			set_current_state(TASK_INTERRUPTIBLE);
++			schedule_timeout(10);
++		}
++		if (counter++ > wait_for_reset) {
++			printk(KERN_ERR "mcbsp[%d] Reset timeout\n", id);
++			return -ETIMEDOUT;
++		}
++	}
++	mcbsp_power_settings(id, MCBSP2_SYSCONFIG_LVL1);
++	omap_mcbsp_write(io_base, OMAP_MCBSP_REG_WKUPEN, 0xFFFF);
++	return 0;
++}
++EXPORT_SYMBOL(omap2_mcbsp_reset);
++
++/*
++ * Get the element index and frame index of transmitter
++ * id		: McBSP interface ID
++ * ei		: element index
++ * fi		: frame index
++ */
++int omap2_mcbsp_transmitter_index(int id, int *ei, int *fi)
++{
++	struct omap_mcbsp *mcbsp = mcbsp_ptr[id];
++	int eix = 0, fix = 0;
++
++	if (!omap_mcbsp_check_valid_id(id)) {
++		printk(KERN_ERR "%s: Invalid id (%d)\n", __func__, id + 1);
++		return -ENODEV;
++	}
++
++	if ((!ei) || (!fi)) {
++		printk(KERN_ERR	"OMAP_McBSP: Invalid ei and fi params \n");
++		goto txinx_err;
++	}
++
++	if (mcbsp->dma_tx_lch == -1) {
++		printk(KERN_ERR "OMAP_McBSP: Transmitter not started\n");
++		goto txinx_err;
++	}
++
++	if (omap_get_dma_chain_index
++		(mcbsp->dma_tx_lch, &eix, &fix) != 0) {
++		printk(KERN_ERR "OMAP_McBSP: Getting chain index failed\n");
++		goto txinx_err;
++	}
++
++	*ei = eix;
++	*fi = fix;
++
++	return 0;
++
++txinx_err:
++	return -EINVAL;
++}
++EXPORT_SYMBOL(omap2_mcbsp_transmitter_index);
++
++/*
++ * Get the element index and frame index of receiver
++ * id	: McBSP interface ID
++ * ei		: element index
++ * fi		: frame index
++ */
++int omap2_mcbsp_receiver_index(int id, int *ei, int *fi)
++{
++	struct omap_mcbsp *mcbsp = mcbsp_ptr[id];
++	int eix = 0, fix = 0;
++
++	if (!omap_mcbsp_check_valid_id(id)) {
++		printk(KERN_ERR "%s: Invalid id (%d)\n", __func__, id + 1);
++		return -ENODEV;
++	}
++
++	if ((!ei) || (!fi)) {
++		printk(KERN_ERR	"OMAP_McBSP: Invalid ei and fi params x\n");
++		goto rxinx_err;
++	}
++
++	/* Check if chain exists */
++	if (mcbsp->dma_rx_lch == -1) {
++		printk(KERN_ERR "OMAP_McBSP: Receiver not started\n");
++		goto rxinx_err;
++	}
++
++	/* Get dma_chain_index */
++	if (omap_get_dma_chain_index
++		(mcbsp->dma_rx_lch, &eix, &fix) != 0) {
++		printk(KERN_ERR "OMAP_McBSP: Getting chain index failed\n");
++		goto rxinx_err;
++	}
++
++	*ei = eix;
++	*fi = fix;
++	return 0;
++
++rxinx_err:
++	return -EINVAL;
++}
++EXPORT_SYMBOL(omap2_mcbsp_receiver_index);
++
++/*
++ * Basic Reset Transmitter
++ * id		: McBSP interface number
++ * state	: Disable (0)/ Enable (1) the transmitter
++ */
++int omap2_mcbsp_set_xrst(unsigned int id, u8 state)
++{
++	struct omap_mcbsp *mcbsp = mcbsp_ptr[id];
++	u32 io_base;
++
++	if (!omap_mcbsp_check_valid_id(id)) {
++		printk(KERN_ERR "%s: Invalid id (%d)\n", __func__, id + 1);
++		return -ENODEV;
++	}
++	io_base = mcbsp->io_base;
++
++	if (state == OMAP_MCBSP_XRST_DISABLE)
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR2,
++		      omap_mcbsp_read(io_base, OMAP_MCBSP_REG_SPCR2) & (~XRST));
++	else
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR2,
++			omap_mcbsp_read(io_base, OMAP_MCBSP_REG_SPCR2) | XRST);
++	udelay(10);
++
++	return 0;
++}
++EXPORT_SYMBOL(omap2_mcbsp_set_xrst);
++
++/*
++ * Reset Receiver
++ * id		: McBSP interface number
++ * state	: Disable (0)/ Enable (1) the receiver
++ */
++int omap2_mcbsp_set_rrst(unsigned int id, u8 state)
++{
++	struct omap_mcbsp *mcbsp = mcbsp_ptr[id];
++	u32 io_base;
++
++	if (!omap_mcbsp_check_valid_id(id)) {
++		printk(KERN_ERR "%s: Invalid id (%d)\n", __func__, id + 1);
++		return -ENODEV;
++	}
++	io_base = mcbsp->io_base;
++
++	if (state == OMAP_MCBSP_RRST_DISABLE)
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR1,
++			omap_mcbsp_read(io_base,
++				 OMAP_MCBSP_REG_SPCR1) & (~RRST));
++	else
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR1,
++		      omap_mcbsp_read(io_base, OMAP_MCBSP_REG_SPCR1) | RRST);
++	udelay(10);
++	return 0;
++}
++EXPORT_SYMBOL(omap2_mcbsp_set_rrst);
++
++/*
++ * Configure the receiver parameters
++ * id		: McBSP Interface ID
++ * rp		: DMA Receive parameters
++ */
++int omap2_mcbsp_dma_recv_params(unsigned int id,
++				omap_mcbsp_dma_transfer_params *rp)
++{
++	struct omap_mcbsp *mcbsp;
++	u32 io_base;
++	int err, chain_id = -1;
++	struct omap_dma_channel_params rx_params;
++	u32  dt = 0;
++
++	if (!omap_mcbsp_check_valid_id(id)) {
++		printk(KERN_ERR "%s: Invalid id (%d)\n", __func__, id + 1);
++		return -ENODEV;
++	}
++
++	mcbsp = id_to_mcbsp_ptr(id);
++	io_base = mcbsp->io_base;
++	dt = rp->word_length1;
++
++	if (dt == OMAP_MCBSP_WORD_8)
++		rx_params.data_type = OMAP_DMA_DATA_TYPE_S8;
++	else if (dt == OMAP_MCBSP_WORD_16)
++		rx_params.data_type = OMAP_DMA_DATA_TYPE_S16;
++	else if (dt == OMAP_MCBSP_WORD_32)
++		rx_params.data_type = OMAP_DMA_DATA_TYPE_S32;
++	else
++		return -EINVAL;
++
++	rx_params.read_prio = DMA_CH_PRIO_HIGH;
++	rx_params.write_prio = DMA_CH_PRIO_HIGH;
++	rx_params.sync_mode = OMAP_DMA_SYNC_ELEMENT;
++	rx_params.src_fi = 0;
++	rx_params.trigger = mcbsp->dma_rx_sync;
++	rx_params.src_or_dst_synch = 0x01;
++	rx_params.src_amode = OMAP_DMA_AMODE_CONSTANT;
++	rx_params.src_ei = 0x0;
++	/* Indexing is always in bytes - so multiply with dt */
++
++	dt = (rx_params.data_type == OMAP_DMA_DATA_TYPE_S8) ? 1 :
++		(rx_params.data_type == OMAP_DMA_DATA_TYPE_S16) ? 2 : 4;
++
++	/* SKIP_FIRST and sKIP_SECOND- 24 bit data in stereo mode*/
++	if (rp->skip_alt == OMAP_MCBSP_SKIP_SECOND) {
++		rx_params.dst_amode = OMAP_DMA_AMODE_DOUBLE_IDX;
++		rx_params.dst_ei = (1);
++		rx_params.dst_fi = (1) + ((-1) * dt);
++	} else if (rp->skip_alt == OMAP_MCBSP_SKIP_FIRST) {
++		rx_params.dst_amode = OMAP_DMA_AMODE_DOUBLE_IDX;
++		rx_params.dst_ei = 1 + (-2) * dt;
++		rx_params.dst_fi = 1 + (2) * dt;
++	} else {
++		rx_params.dst_amode = OMAP_DMA_AMODE_POST_INC;
++		rx_params.dst_ei = 0;
++		rx_params.dst_fi = 0;
++	}
++
++	mcbsp->rxskip_alt = rp->skip_alt;
++	mcbsp->auto_reset &= ~OMAP_MCBSP_AUTO_RRST;
++	mcbsp->auto_reset |=	(rp->auto_reset & OMAP_MCBSP_AUTO_RRST);
++
++	mcbsp->rx_word_length = rx_params.data_type << 0x1;
++	if (rx_params.data_type == 0)
++		mcbsp->rx_word_length = 1;
++
++	mcbsp->rx_callback = rp->callback;
++	/* request for a chain of dma channels for data reception */
++	if (mcbsp->dma_rx_lch == -1) {
++		err = omap_request_dma_chain(id, "McBSP RX",
++					 omap2_mcbsp_rx_dma_callback, &chain_id,
++					 2, OMAP_DMA_DYNAMIC_CHAIN, rx_params);
++		if (err < 0) {
++			printk(KERN_ERR "Receive path configuration failed \n");
++			return -EINVAL;
++		}
++		mcbsp->dma_rx_lch = chain_id;
++		mcbsp->rx_dma_chain_state = 0;
++	} else {
++		/* DMA params already set, modify the same!! */
++		err = omap_modify_dma_chain_params(mcbsp->dma_rx_lch,
++								 rx_params);
++		if (err < 0)
++			return -EINVAL;
++	}
++
++	return 0;
++}
++EXPORT_SYMBOL(omap2_mcbsp_dma_recv_params);
++
++/*
++ * Configure the transmitter parameters
++ * id		: McBSP Interface ID
++ * tp		: DMA Transfer parameters
++ */
++
++int omap2_mcbsp_dma_trans_params(unsigned int id,
++				omap_mcbsp_dma_transfer_params *tp)
++{
++	struct omap_mcbsp *mcbsp;
++
++	struct omap_dma_channel_params tx_params;
++	int err = 0, chain_id = -1;
++	u32 io_base;
++	u32 dt = 0;
++
++	if (!omap_mcbsp_check_valid_id(id)) {
++		printk(KERN_ERR "%s: Invalid id (%d)\n", __func__, id + 1);
++		return -ENODEV;
++	}
++
++	mcbsp = id_to_mcbsp_ptr(id);
++	io_base = mcbsp->io_base;
++
++	dt = tp->word_length1;
++	if ((dt != OMAP_MCBSP_WORD_8) && (dt != OMAP_MCBSP_WORD_16)
++						 && (dt != OMAP_MCBSP_WORD_32))
++		return -EINVAL;
++	if (dt == OMAP_MCBSP_WORD_8)
++		tx_params.data_type = OMAP_DMA_DATA_TYPE_S8;
++	else if (dt == OMAP_MCBSP_WORD_16)
++		tx_params.data_type = OMAP_DMA_DATA_TYPE_S16;
++	else if (dt == OMAP_MCBSP_WORD_32)
++		tx_params.data_type = OMAP_DMA_DATA_TYPE_S32;
++	else
++		return -EINVAL;
++
++	tx_params.read_prio = DMA_CH_PRIO_HIGH;
++	tx_params.write_prio = DMA_CH_PRIO_HIGH;
++	tx_params.sync_mode = OMAP_DMA_SYNC_ELEMENT;
++	tx_params.dst_fi = 0;
++	tx_params.trigger = mcbsp->dma_tx_sync;
++	tx_params.src_or_dst_synch = 0;
++	/* Indexing is always in bytes - so multiply with dt */
++	mcbsp->tx_word_length = tx_params.data_type << 0x1;
++
++	if (tx_params.data_type == 0)
++		mcbsp->tx_word_length = 1;
++	dt = mcbsp->tx_word_length;
++
++	/* SKIP_FIRST and sKIP_SECOND- 24 bit data in stereo mode*/
++	if (tp->skip_alt == OMAP_MCBSP_SKIP_SECOND) {
++		tx_params.src_amode = OMAP_DMA_AMODE_DOUBLE_IDX;
++		tx_params.src_ei = (1);
++		tx_params.src_fi = (1) + ((-1) * dt);
++	} else if (tp->skip_alt == OMAP_MCBSP_SKIP_FIRST) {
++		tx_params.src_amode = OMAP_DMA_AMODE_DOUBLE_IDX;
++		tx_params.src_ei = 1 + (-2) * dt;
++		tx_params.src_fi = 1 + (2) * dt;
++	} else {
++		tx_params.src_amode = OMAP_DMA_AMODE_POST_INC;
++		tx_params.src_ei = 0;
++		tx_params.src_fi = 0;
++	}
++
++	tx_params.dst_amode = OMAP_DMA_AMODE_CONSTANT;
++	tx_params.dst_ei = 0;
++	mcbsp->txskip_alt = tp->skip_alt;
++	mcbsp->auto_reset &= ~OMAP_MCBSP_AUTO_XRST;
++	mcbsp->auto_reset |=
++		(tp->auto_reset & OMAP_MCBSP_AUTO_XRST);
++	mcbsp->tx_callback = tp->callback;
++
++	/* Based on Rjust we can do double indexing DMA params configuration */
++	if (mcbsp->dma_tx_lch == -1) {
++		err = omap_request_dma_chain(id, "McBSP TX",
++					 omap2_mcbsp_tx_dma_callback, &chain_id,
++					 2, OMAP_DMA_DYNAMIC_CHAIN, tx_params);
++		if (err < 0) {
++			printk(KERN_ERR
++				"Transmit path configuration failed \n");
++			return -EINVAL;
++		}
++		mcbsp->tx_dma_chain_state = 0;
++	mcbsp->dma_tx_lch = chain_id;
++	} else {
++		/* DMA params already set, modify the same!! */
++		err = omap_modify_dma_chain_params(mcbsp->dma_tx_lch,
++								 tx_params);
++		if (err < 0)
++			return -EINVAL;
++	}
++
++	return 0;
++}
++EXPORT_SYMBOL(omap2_mcbsp_dma_trans_params);
++
++/*
++ * Start receving data on a McBSP interface
++ * id			: McBSP interface ID
++ * cbdata		: User data to be returned with callback
++ * buf_start_addr	: The destination address [physical address]
++ * buf_size		: Buffer size
++ */
++
++int omap2_mcbsp_receive_data(unsigned int id, void *cbdata,
++			     dma_addr_t buf_start_addr, u32 buf_size)
++{
++	struct omap_mcbsp *mcbsp;
++	u32 io_base;
++	int enable_rx = 0;
++	int e_count = 0;
++	int f_count = 0;
++
++	if (!omap_mcbsp_check_valid_id(id)) {
++		printk(KERN_ERR "%s: Invalid id (%d)\n", __func__, id + 1);
++		return -ENODEV;
++	}
++
++	mcbsp = id_to_mcbsp_ptr(id);
++
++	io_base = mcbsp->io_base;
++
++	mcbsp->rx_cb_arg = cbdata;
++
++	/* Auto RRST handling logic - disable the Reciever before 1st dma */
++	if ((mcbsp->auto_reset & OMAP_MCBSP_AUTO_RRST) &&
++		(omap_dma_chain_status(mcbsp->dma_rx_lch)
++				== OMAP_DMA_CHAIN_INACTIVE)) {
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR1,
++			omap_mcbsp_read(io_base,
++				 OMAP_MCBSP_REG_SPCR1) & (~RRST));
++		enable_rx = 1;
++	}
++
++	/*
++	 * for skip_first and second, we need to set e_count =2,
++	 * and f_count = number of frames = number of elements/e_count
++	 */
++	e_count = (buf_size / mcbsp->rx_word_length);
++
++	if (mcbsp->rxskip_alt != OMAP_MCBSP_SKIP_NONE) {
++		/*
++		 * since the number of frames = total number of elements/element
++		 * count, However, with double indexing for data transfers,
++		 * double the number of elements need to be transmitted
++		 */
++		f_count = e_count;
++		e_count = 2;
++	} else {
++		f_count = 1;
++	}
++	/*
++	 * If the DMA is to be configured to skip the first byte, we need
++	 * to jump backwards, so we need to move one chunk forward and
++	 * ask dma if we dont want the client driver knowing abt this.
++	 */
++	if (mcbsp->rxskip_alt == OMAP_MCBSP_SKIP_FIRST)
++		buf_start_addr += mcbsp->rx_word_length;
++
++	if (omap_dma_chain_a_transfer(mcbsp->dma_rx_lch,
++			mcbsp->phy_base + OMAP_MCBSP_REG_DRR, buf_start_addr,
++			e_count, f_count, mcbsp) < 0) {
++		printk(KERN_ERR " Buffer chaining failed \n");
++		return -EINVAL;
++	}
++	if (mcbsp->rx_dma_chain_state == 0) {
++		if (mcbsp->interface_mode == OMAP_MCBSP_MASTER)
++			omap2_mcbsp_set_srg_fsg(id, OMAP_MCBSP_ENABLE_FSG_SRG);
++
++		if (omap_start_dma_chain_transfers(mcbsp->dma_rx_lch) < 0)
++			return -EINVAL;
++		mcbsp->rx_dma_chain_state = 1;
++	}
++	/* Auto RRST handling logic - Enable the Reciever after 1st dma */
++	if (enable_rx &&
++		(omap_dma_chain_status(mcbsp->dma_rx_lch)
++				== OMAP_DMA_CHAIN_ACTIVE))
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR1,
++			omap_mcbsp_read(io_base, OMAP_MCBSP_REG_SPCR1) | RRST);
++
++	return 0;
++}
++EXPORT_SYMBOL(omap2_mcbsp_receive_data);
++
++/*
++ * Start transmitting data through a McBSP interface
++ * id			: McBSP interface ID
++ * cbdata		: User data to be returned with callback
++ * buf_start_addr	: The source address [This should be physical address]
++ * buf_size		: Buffer size
++ */
++int omap2_mcbsp_send_data(unsigned int id, void *cbdata,
++			  dma_addr_t buf_start_addr, u32 buf_size)
++{
++	struct omap_mcbsp *mcbsp;
++	u32 io_base;
++	u8 enable_tx = 0;
++	int e_count = 0;
++	int f_count = 0;
++
++	if (!omap_mcbsp_check_valid_id(id)) {
++		printk(KERN_ERR "%s: Invalid id (%d)\n", __func__, id + 1);
++		return -ENODEV;
++	}
++	mcbsp = id_to_mcbsp_ptr(id);
++
++	io_base = mcbsp->io_base;
++
++	mcbsp->tx_cb_arg = cbdata;
++
++	/* Auto RRST handling logic - disable the Reciever before 1st dma */
++	if ((mcbsp->auto_reset & OMAP_MCBSP_AUTO_XRST) &&
++			(omap_dma_chain_status(mcbsp->dma_tx_lch)
++				== OMAP_DMA_CHAIN_INACTIVE)) {
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR2,
++			omap_mcbsp_read(io_base,
++				OMAP_MCBSP_REG_SPCR2) & (~XRST));
++		enable_tx = 1;
++	}
++	/*
++	 * for skip_first and second, we need to set e_count =2, and
++	 * f_count = number of frames = number of elements/e_count
++	 */
++	e_count = (buf_size / mcbsp->tx_word_length);
++	if (mcbsp->txskip_alt != OMAP_MCBSP_SKIP_NONE) {
++		/*
++		 * number of frames = total number of elements/element count,
++		 * However, with double indexing for data transfers, double I
++		 * the number of elements need to be transmitted
++		 */
++		f_count = e_count;
++		e_count = 2;
++	} else {
++		f_count = 1;
++	}
++
++	/*
++	 * If the DMA is to be configured to skip the first byte, we need
++	 * to jump backwards, so we need to move one chunk forward and ask
++	 * dma if we dont want the client driver knowing abt this.
++	 */
++	if (mcbsp->txskip_alt == OMAP_MCBSP_SKIP_FIRST)
++		buf_start_addr += mcbsp->tx_word_length;
++
++	if (omap_dma_chain_a_transfer(mcbsp->dma_tx_lch,
++		buf_start_addr,	mcbsp->phy_base + OMAP_MCBSP_REG_DXR,
++		e_count, f_count, mcbsp) < 0)
++			return -EINVAL;
++
++	if (mcbsp->tx_dma_chain_state == 0) {
++		if (mcbsp->interface_mode == OMAP_MCBSP_MASTER)
++			omap2_mcbsp_set_srg_fsg(id, OMAP_MCBSP_ENABLE_FSG_SRG);
++
++		if (omap_start_dma_chain_transfers(mcbsp->dma_tx_lch) < 0)
++			return -EINVAL;
++		mcbsp->tx_dma_chain_state = 1;
++	}
++
++	/* Auto XRST handling logic - Enable the Reciever after 1st dma */
++	if (enable_tx &&
++		(omap_dma_chain_status(mcbsp->dma_tx_lch)
++		== OMAP_DMA_CHAIN_ACTIVE))
++		omap_mcbsp_write(io_base, OMAP_MCBSP_REG_SPCR2,
++			omap_mcbsp_read(io_base, OMAP_MCBSP_REG_SPCR2) | XRST);
++
++	return 0;
++}
++EXPORT_SYMBOL(omap2_mcbsp_send_data);
+ 
+ #ifdef CONFIG_ARCH_OMAP24XX
+ static struct omap_mcbsp_platform_data omap24xx_mcbsp_pdata[] = {
+@@ -176,6 +1079,7 @@ static struct omap_mcbsp_platform_data omap24xx_mcbsp_pdata[] = {
+ static struct omap_mcbsp_platform_data omap34xx_mcbsp_pdata[] = {
+ 	{
+ 		.virt_base	= OMAP2_IO_ADDRESS(OMAP34XX_MCBSP1_BASE),
++		.phy_base	= OMAP34XX_MCBSP1_BASE,
+ 		.dma_rx_sync	= OMAP24XX_DMA_MCBSP1_RX,
+ 		.dma_tx_sync	= OMAP24XX_DMA_MCBSP1_TX,
+ 		.rx_irq		= INT_24XX_MCBSP1_IRQ_RX,
+@@ -185,6 +1089,7 @@ static struct omap_mcbsp_platform_data omap34xx_mcbsp_pdata[] = {
+ 	},
+ 	{
+ 		.virt_base	= OMAP2_IO_ADDRESS(OMAP34XX_MCBSP2_BASE),
++		.phy_base	= OMAP34XX_MCBSP2_BASE,
+ 		.dma_rx_sync	= OMAP24XX_DMA_MCBSP2_RX,
+ 		.dma_tx_sync	= OMAP24XX_DMA_MCBSP2_TX,
+ 		.rx_irq		= INT_24XX_MCBSP2_IRQ_RX,
+@@ -194,6 +1099,7 @@ static struct omap_mcbsp_platform_data omap34xx_mcbsp_pdata[] = {
+ 	},
+ 	{
+ 		.virt_base	= OMAP2_IO_ADDRESS(OMAP34XX_MCBSP3_BASE),
++		.phy_base	= OMAP34XX_MCBSP3_BASE,
+ 		.dma_rx_sync	= OMAP24XX_DMA_MCBSP3_RX,
+ 		.dma_tx_sync	= OMAP24XX_DMA_MCBSP3_TX,
+ 		.ops		= &omap2_mcbsp_ops,
+@@ -201,6 +1107,7 @@ static struct omap_mcbsp_platform_data omap34xx_mcbsp_pdata[] = {
+ 	},
+ 	{
+ 		.virt_base	= OMAP2_IO_ADDRESS(OMAP34XX_MCBSP4_BASE),
++		.phy_base	= OMAP34XX_MCBSP4_BASE,
+ 		.dma_rx_sync	= OMAP24XX_DMA_MCBSP4_RX,
+ 		.dma_tx_sync	= OMAP24XX_DMA_MCBSP4_TX,
+ 		.ops		= &omap2_mcbsp_ops,
+@@ -208,6 +1115,7 @@ static struct omap_mcbsp_platform_data omap34xx_mcbsp_pdata[] = {
+ 	},
+ 	{
+ 		.virt_base	= OMAP2_IO_ADDRESS(OMAP34XX_MCBSP5_BASE),
++		.phy_base	= OMAP34XX_MCBSP5_BASE,
+ 		.dma_rx_sync	= OMAP24XX_DMA_MCBSP5_RX,
+ 		.dma_tx_sync	= OMAP24XX_DMA_MCBSP5_TX,
+ 		.ops		= &omap2_mcbsp_ops,
+diff --git a/arch/arm/plat-omap/mcbsp.c b/arch/arm/plat-omap/mcbsp.c
+index 70944a5..70d79f6 100644
+--- a/arch/arm/plat-omap/mcbsp.c
++++ b/arch/arm/plat-omap/mcbsp.c
+@@ -23,6 +23,7 @@
+ #include <linux/clk.h>
+ #include <linux/delay.h>
+ #include <linux/io.h>
++#include <linux/irq.h>
+ 
+ #include <asm/arch/dma.h>
+ #include <asm/arch/mcbsp.h>
+@@ -51,9 +52,6 @@ int omap_mcbsp_read(u32 io_base, u16 reg)
+ #define OMAP_MCBSP_WRITE(base, reg, val) \
+ 			omap_mcbsp_write(base, OMAP_MCBSP_REG_##reg, val)
+ 
+-#define omap_mcbsp_check_valid_id(id)	(id < omap_mcbsp_count)
+-#define id_to_mcbsp_ptr(id)		mcbsp_ptr[id];
+-
+ static void omap_mcbsp_dump_reg(u8 id)
+ {
+ 	struct omap_mcbsp *mcbsp = id_to_mcbsp_ptr(id);
+@@ -173,6 +171,11 @@ void omap_mcbsp_config(unsigned int id, const struct omap_mcbsp_reg_cfg *config)
+ 	OMAP_MCBSP_WRITE(io_base, MCR2, config->mcr2);
+ 	OMAP_MCBSP_WRITE(io_base, MCR1, config->mcr1);
+ 	OMAP_MCBSP_WRITE(io_base, PCR0, config->pcr0);
++	if (cpu_is_omap2430() || cpu_is_omap34xx()) {
++		if (mcbsp->pdata->ops->config)
++			mcbsp->pdata->ops->config(id, config);
++	}
++
+ }
+ EXPORT_SYMBOL(omap_mcbsp_config);
+ 
+@@ -217,12 +220,11 @@ int omap_mcbsp_request(unsigned int id)
+ 		return -ENODEV;
+ 	}
+ 	mcbsp = id_to_mcbsp_ptr(id);
++	clk_enable(mcbsp->clk);
+ 
+ 	if (mcbsp->pdata && mcbsp->pdata->ops && mcbsp->pdata->ops->request)
+ 		mcbsp->pdata->ops->request(id);
+ 
+-	clk_enable(mcbsp->clk);
+-
+ 	spin_lock(&mcbsp->lock);
+ 	if (!mcbsp->free) {
+ 		dev_err(mcbsp->dev, "McBSP%d is currently in use\n",
+@@ -893,6 +895,7 @@ static int __init omap_mcbsp_probe(struct platform_device *pdev)
+ 	mcbsp->dma_rx_lch = -1;
+ 
+ 	mcbsp->io_base = pdata->virt_base;
++	mcbsp->phy_base = pdata->phy_base;
+ 	/* Default I/O is IRQ based */
+ 	mcbsp->io_type = OMAP_MCBSP_IRQ_IO;
+ 	mcbsp->tx_irq = pdata->tx_irq;
+diff --git a/include/asm-arm/arch-omap/mcbsp.h b/include/asm-arm/arch-omap/mcbsp.h
+index 8fa89c2..2630d40 100644
+--- a/include/asm-arm/arch-omap/mcbsp.h
++++ b/include/asm-arm/arch-omap/mcbsp.h
+@@ -127,6 +127,9 @@
+ #define OMAP_MCBSP_REG_XCERG	0x74
+ #define OMAP_MCBSP_REG_XCERH	0x78
+ #define OMAP_MCBSP_REG_SYSCON	0x8C
++#define OMAP_MCBSP_REG_IRQSTAT	0xA0
++#define OMAP_MCBSP_REG_IRQEN	0xA4
++#define OMAP_MCBSP_REG_WKUPEN	0xA8
+ #define OMAP_MCBSP_REG_XCCR	0xAC
+ #define OMAP_MCBSP_REG_RCCR	0xB0
+ 
+@@ -139,6 +142,11 @@
+ 
+ #endif
+ 
++#define OMAP_MCBSP_BIT(ARG)	((0x01)<<(ARG))
++
++#define MCBSP2_SYSCONFIG_LVL1	1
++#define MCBSP2_SYSCONFIG_LVL2	2
++
+ /************************** McBSP SPCR1 bit definitions ***********************/
+ #define RRST			0x0001
+ #define RRDY			0x0002
+@@ -237,33 +245,145 @@
+ #define RDISABLE		0x0001
+ 
+ /********************** McBSP SYSCONFIG bit definitions ********************/
+-#define SOFTRST			0x0002
++#define SOFTRST			OMAP_MCBSP_BIT(1)
++#define FORCE_IDLE		0x0
++#define NO_IDLE			0x1
++#define SMART_IDLE		0x2
++#define MCBSP_SYSC_IOFF_FOFF	0x0
++#define MCBSP_SYSC_IOFF_FON	0x2 /* Err in TRM ES2.0 ?? */
++#define CLOCKACTIVITY(ARG)	(((ARG) & 0x03) << 8)
++#define SIDLEMODE(ARG)		(((ARG) & 0x03) << 3)
++#define ENAWAKEUP		OMAP_MCBSP_BIT(2)
++
++/********************** MACRO DEFINITIONS *********************************/
++
++/* McBSP interface operating mode */
++#define OMAP_MCBSP_MASTER			1
++#define OMAP_MCBSP_SLAVE			0
++
++#define OMAP_MCBSP_AUTO_RST_NONE		(0x0)
++#define OMAP_MCBSP_AUTO_RRST			(0x1<<1)
++#define OMAP_MCBSP_AUTO_XRST			(0x1<<2)
++
++/* SRG ENABLE/DISABLE state */
++#define OMAP_MCBSP_ENABLE_FSG_SRG		1
++#define OMAP_MCBSP_DISABLE_FSG_SRG		2
++/* mono to mono mode*/
++#define OMAP_MCBSP_SKIP_NONE			(0x0)
++/* mono to stereo mode */
++#define OMAP_MCBSP_SKIP_FIRST			(0x1<<1)
++#define OMAP_MCBSP_SKIP_SECOND			(0x1<<2)
++/* RRST STATE */
++#define OMAP_MCBSP_RRST_DISABLE			0
++#define OMAP_MCBSP_RRST_ENABLE			1
++/*XRST STATE */
++#define OMAP_MCBSP_XRST_DISABLE			0
++#define OMAP_MCBSP_XRST_ENABLE			1
++
++#define OMAP_MCBSP_FRAME_SINGLEPHASE		1
++
++/* Sample Rate Generator Clock source */
++#define OMAP_MCBSP_SRGCLKSRC_CLKS		1
++#define OMAP_MCBSP_SRGCLKSRC_FCLK		2
++#define OMAP_MCBSP_SRGCLKSRC_CLKR		3
++#define OMAP_MCBSP_SRGCLKSRC_CLKX		4
++
++/* SRG input clock polarity */
++#define OMAP_MCBSP_CLKS_POLARITY_RISING		1
++#define OMAP_MCBSP_CLKS_POLARITY_FALLING	2
++
++#define OMAP_MCBSP_CLKX_POLARITY_RISING		1
++#define OMAP_MCBSP_CLKX_POLARITY_FALLING	2
++
++#define OMAP_MCBSP_CLKR_POLARITY_RISING		1
++#define OMAP_MCBSP_CLKR_POLARITY_FALLING	2
++
++/* SRG Clock synchronization mode */
++#define OMAP_MCBSP_SRG_FREERUNNING		1
++#define OMAP_MCBSP_SRG_RUNNING			2
++
++/* Frame Sync Source */
++#define OMAP_MCBSP_TXFSYNC_EXTERNAL		0
++#define OMAP_MCBSP_TXFSYNC_INTERNAL		1
++
++#define OMAP_MCBSP_RXFSYNC_EXTERNAL		0
++#define OMAP_MCBSP_RXFSYNC_INTERNAL		1
++
++#define OMAP_MCBSP_CLKRXSRC_EXTERNAL		1
++#define OMAP_MCBSP_CLKRXSRC_INTERNAL		2
++
++#define OMAP_MCBSP_CLKTXSRC_EXTERNAL		1
++#define OMAP_MCBSP_CLKTXSRC_INTERNAL		2
++
++/* Justification */
++#define OMAP_MCBSP_RJUST_ZEROMSB		0
++#define OMAP_MCBSP_RJUST_SIGNMSB		1
++#define OMAP_MCBSP_LJUST_ZEROLSB		2
++
++#define OMAP_MCBSP_DATADELAY0			0
++#define OMAP_MCBSP_DATADELAY1			1
++#define OMAP_MCBSP_DATADELAY2			2
++
++/* Reverse mode for 243X and 34XX */
++#define OMAP_MCBSP_MSBFIRST			0
++#define OMAP_MCBSP_LSBFIRST			1
++
++#define OMAP_MCBSP_FRAMELEN_N(NUM_WORDS)	((NUM_WORDS - 1) & 0x7F)
++
++struct omap_mcbsp_cfg_param {
++	u8 fsync_src;
++	u8 fs_polarity;
++	u8 clk_polarity;
++	u8 clk_mode;
++	u8 frame_length1;
++	u8 frame_length2;
++	u8 word_length1;
++	u8 word_length2;
++	u8 justification;
++	u8 reverse_compand;
++	u8 phase;
++	u8 data_delay;
++};
++
++struct omap_mcbsp_srg_fsg_cfg {
++	u32 period;	/* Frame period */
++	u32 pulse_width; /* Frame width */
++	u8 fsgm;
++	u32 sample_rate;
++	u32 bits_per_sample;
++	u32 srg_src;
++	u8 sync_mode;	/* SRG free running mode */
++	u8 polarity;
++	u8 dlb;		/* digital loopback mode */
++};
+ 
+ /* we don't do multichannel for now */
+ struct omap_mcbsp_reg_cfg {
+-	u16 spcr2;
+-	u16 spcr1;
+-	u16 rcr2;
+-	u16 rcr1;
+-	u16 xcr2;
+-	u16 xcr1;
+-	u16 srgr2;
+-	u16 srgr1;
+-	u16 mcr2;
+-	u16 mcr1;
+-	u16 pcr0;
+-	u16 rcerc;
+-	u16 rcerd;
+-	u16 xcerc;
+-	u16 xcerd;
+-	u16 rcere;
+-	u16 rcerf;
+-	u16 xcere;
+-	u16 xcerf;
+-	u16 rcerg;
+-	u16 rcerh;
+-	u16 xcerg;
+-	u16 xcerh;
++	u32 spcr2;
++	u32 spcr1;
++	u32 rcr2;
++	u32 rcr1;
++	u32 xcr2;
++	u32 xcr1;
++	u32 srgr2;
++	u32 srgr1;
++	u32 mcr2;
++	u32 mcr1;
++	u32 pcr0;
++	u32 rcerc;
++	u32 rcerd;
++	u32 xcerc;
++	u32 xcerd;
++	u32 rcere;
++	u32 rcerf;
++	u32 xcere;
++	u32 xcerf;
++	u32 rcerg;
++	u32 rcerh;
++	u32 xcerg;
++	u32 xcerh;
++	u32 xccr;
++	u32 rccr;
+ };
+ 
+ typedef enum {
+@@ -277,6 +397,7 @@ typedef enum {
+ typedef int __bitwise omap_mcbsp_io_type_t;
+ #define OMAP_MCBSP_IRQ_IO ((__force omap_mcbsp_io_type_t) 1)
+ #define OMAP_MCBSP_POLL_IO ((__force omap_mcbsp_io_type_t) 2)
++typedef void (*omap_mcbsp_dma_cb) (u32 ch_status, void *arg);
+ 
+ typedef enum {
+ 	OMAP_MCBSP_WORD_8 = 0,
+@@ -319,14 +440,27 @@ struct omap_mcbsp_spi_cfg {
+ 	omap_mcbsp_word_length		word_length;
+ };
+ 
++typedef struct omap_mcbsp_dma_transfer_parameters {
++	/* Skip the alternate element use fro stereo mode */
++	u8 skip_alt;
++	/* Automagically handle Transfer [XR]RST? */
++	u8   auto_reset;
++	/* callback function executed for every tx/rx completion */
++	omap_mcbsp_dma_cb callback;
++	/* word length of data */
++	u32 word_length1;
++} omap_mcbsp_dma_transfer_params;
++
+ /* Platform specific configuration */
+ struct omap_mcbsp_ops {
+ 	void (*request)(unsigned int);
+ 	void (*free)(unsigned int);
++	void (*config)(unsigned int,  const struct omap_mcbsp_reg_cfg *config);
+ };
+ 
+ struct omap_mcbsp_platform_data {
+ 	u32 virt_base;
++	u32 phy_base;
+ 	u8 dma_rx_sync, dma_tx_sync;
+ 	u16 rx_irq, tx_irq;
+ 	struct omap_mcbsp_ops *ops;
+@@ -362,10 +496,24 @@ struct omap_mcbsp {
+ 	spinlock_t lock;
+ 	struct omap_mcbsp_platform_data *pdata;
+ 	struct clk *clk;
++	u32 phy_base;
++	u8  auto_reset;	/* Auto Reset */
++	u8  txskip_alt;	/* Tx skip flags */
++	u8  rxskip_alt;	/* Rx skip flags */
++	void  *rx_cb_arg;
++	void  *tx_cb_arg;
++	omap_mcbsp_dma_cb  rx_callback;
++	omap_mcbsp_dma_cb  tx_callback;
++	int  rx_dma_chain_state;
++	int  tx_dma_chain_state;
++	int  interface_mode; /* Master / Slave */
+ };
+ extern struct omap_mcbsp **mcbsp_ptr;
+ extern int omap_mcbsp_count;
+ 
++#define omap_mcbsp_check_valid_id(id)	(id < omap_mcbsp_count)
++#define id_to_mcbsp_ptr(id)		mcbsp_ptr[id];
++
+ int omap_mcbsp_init(void);
+ void omap_mcbsp_register_board_cfg(struct omap_mcbsp_platform_data *config,
+ 					int size);
+@@ -382,7 +530,6 @@ int omap_mcbsp_recv_buffer(unsigned int id, dma_addr_t buffer, unsigned int leng
+ int omap_mcbsp_spi_master_xmit_word_poll(unsigned int id, u32 word);
+ int omap_mcbsp_spi_master_recv_word_poll(unsigned int id, u32 * word);
+ 
+-
+ /* SPI specific API */
+ void omap_mcbsp_set_spi_mode(unsigned int id, const struct omap_mcbsp_spi_cfg * spi_cfg);
+ 
+@@ -391,4 +538,27 @@ int omap_mcbsp_pollread(unsigned int id, u16 * buf);
+ int omap_mcbsp_pollwrite(unsigned int id, u16 buf);
+ int omap_mcbsp_set_io_type(unsigned int id, omap_mcbsp_io_type_t io_type);
+ 
++void omap_mcbsp_write(u32 io_base, u16 reg, u32 val);
++int omap_mcbsp_read(u32 io_base, u16 reg);
++
++int omap2_mcbsp_stop_datatx(unsigned int id);
++int omap2_mcbsp_stop_datarx(u32 id);
++int omap2_mcbsp_reset(unsigned int id);
++int omap2_mcbsp_transmitter_index(int id, int *ei, int *fi);
++int omap2_mcbsp_receiver_index(int id, int *ei, int *fi);
++int omap2_mcbsp_set_xrst(unsigned int id, u8 state);
++int omap2_mcbsp_set_rrst(unsigned int id, u8 state);
++int omap2_mcbsp_dma_recv_params(unsigned int id,
++				omap_mcbsp_dma_transfer_params *rp);
++int omap2_mcbsp_dma_trans_params(unsigned int id,
++				omap_mcbsp_dma_transfer_params *tp);
++int omap2_mcbsp_receive_data(unsigned int id, void *cbdata,
++				dma_addr_t buf_start_addr, u32 buf_size);
++int omap2_mcbsp_send_data(unsigned int id, void *cbdata,
++				dma_addr_t buf_start_addr, u32 buf_size);
++
++int omap2_mcbsp_params_cfg(unsigned int id, int interface_mode,
++				struct omap_mcbsp_cfg_param *rp,
++				struct omap_mcbsp_cfg_param  *tp,
++				struct omap_mcbsp_srg_fsg_cfg *param);
+ #endif
+diff --git a/include/asm-arm/arch-omap/omap-alsa.h b/include/asm-arm/arch-omap/omap-alsa.h
+index 58879bc..dfc110c 100644
+--- a/include/asm-arm/arch-omap/omap-alsa.h
++++ b/include/asm-arm/arch-omap/omap-alsa.h
+@@ -35,6 +35,8 @@
+  *  2005/07/25 INdT-10LE Kernel Team - 	Alsa driver for omap osk,
+  *  					original version based in sa1100 driver
+  *  					and omap oss driver.
++ *  2007/12/17 Misael Lopez Cruz     -  Added support for 3430 platform
++ *  					and omap oss driver.
+  */
+ 
+ #ifndef __OMAP_ALSA_H
+@@ -118,8 +120,9 @@ struct omap_alsa_codec_config {
+ 	struct	snd_pcm_hw_constraint_list *hw_constraints_rates;
+ 	struct	snd_pcm_hardware *snd_omap_alsa_playback;
+ 	struct	snd_pcm_hardware *snd_omap_alsa_capture;
+-	void	(*codec_configure_dev)(void);
+-	void	(*codec_set_samplerate)(long);
++	int	(*codec_configure_dev)(void);
++	int	(*codec_set_samplerate)(long);
++	int	(*codec_set_stereomode)(int, int);
+ 	void	(*codec_clock_setup)(void);
+ 	int	(*codec_clock_on)(void);
+ 	int 	(*codec_clock_off)(void);
+diff --git a/sound/arm/Kconfig b/sound/arm/Kconfig
+index c685a9c..1f535b7 100644
+--- a/sound/arm/Kconfig
++++ b/sound/arm/Kconfig
+@@ -97,4 +97,9 @@ config SND_OMAP24XX_EAC
+ 	  To compile this driver as a module, choose M here: the module
+ 	  will be called snd-omap24xx-eac.
+ 
++config SND_OMAP3_TWL4030
++        tristate "OMAP3 TWL4030 alsa driver"
++        depends on ARCH_OMAP3430 && SND
++        select SND_PCM
++
+ endmenu
+diff --git a/sound/arm/omap/Makefile b/sound/arm/omap/Makefile
+index 2f004d7..ed28ed3 100644
+--- a/sound/arm/omap/Makefile
++++ b/sound/arm/omap/Makefile
+@@ -16,3 +16,7 @@ snd-omap-alsa-sx1-objs := omap-alsa.o omap-alsa-dma.o omap-alsa-sx1.o omap-alsa-
+ 
+ obj-$(CONFIG_SND_OMAP24XX_EAC) += snd-omap24xx-eac.o
+ snd-omap24xx-eac-objs := eac.o
++
++obj-$(CONFIG_SND_OMAP3_TWL4030) += snd-omap3-alsa-twl4030.o
++snd-omap3-alsa-twl4030-objs := omap-alsa.o omap3-alsa-dma.o omap-alsa-twl4030.o omap-alsa-twl4030-mixer.o
++
+diff --git a/sound/arm/omap/omap-alsa-dma.c b/sound/arm/omap/omap-alsa-dma.c
+index d263933..57090ed 100644
+--- a/sound/arm/omap/omap-alsa-dma.c
++++ b/sound/arm/omap/omap-alsa-dma.c
+@@ -272,7 +272,7 @@ EXPORT_SYMBOL(omap_free_alsa_sound_dma);
+ /*
+  * Stop all the DMA channels of the stream
+  */
+-void omap_stop_alsa_sound_dma(struct audio_stream *s)
++int omap_stop_alsa_sound_dma(struct audio_stream *s)
+ {
+ 	int *chan = s->lch;
+ 	int i;
+@@ -280,15 +280,17 @@ void omap_stop_alsa_sound_dma(struct audio_stream *s)
+ 	FN_IN;
+ 	if (unlikely(NULL == chan)) {
+ 		BUG();
+-		return;
++		return -1;
+ 	}
+ 	for (i = 0; i < nr_linked_channels; i++) {
+ 		int cur_chan = chan[i];
+ 		omap_stop_dma(cur_chan);
+ 	}
+ 	s->started = 0;
++
+ 	FN_OUT(0);
+-	return;
++
++	return 0;
+ }
+ EXPORT_SYMBOL(omap_stop_alsa_sound_dma);
+ 
+diff --git a/sound/arm/omap/omap-alsa-dma.h b/sound/arm/omap/omap-alsa-dma.h
+index 2f0e4e8..cd997a5 100644
+--- a/sound/arm/omap/omap-alsa-dma.h
++++ b/sound/arm/omap/omap-alsa-dma.h
+@@ -48,6 +48,20 @@ int omap_free_alsa_sound_dma(void *data, int **channels);
+ int omap_start_alsa_sound_dma(struct audio_stream *s, dma_addr_t dma_ptr,
+ 				u_int dma_size);
+ 
+-void omap_stop_alsa_sound_dma(struct audio_stream *s);
++int omap_stop_alsa_sound_dma(struct audio_stream *s);
++
++#if defined(CONFIG_SND_OMAP3_TWL4030) \
++	|| defined(CONFIG_SND_OMAP3_TWL4030_MODULE)
++int omap_transfer_posn_alsa_sound_dma(struct audio_stream *s);
++int omap_init_alsa_sound_dma(int mode);
++int twl4030_conf_data_interface(void);
++#else
++static inline int omap_transfer_posn_alsa_sound_dma(struct audio_stream *s)
++		{ return 0; }
++static inline int omap_init_alsa_sound_dma(int mode)
++		{ return 0; }
++static inline int twl4030_conf_data_interface(void)
++		{ return 0; }
++#endif
+ 
+ #endif
+diff --git a/sound/arm/omap/omap-alsa-twl4030-mixer.c b/sound/arm/omap/omap-alsa-twl4030-mixer.c
+new file mode 100644
+index 0000000..b940790
+--- /dev/null
++++ b/sound/arm/omap/omap-alsa-twl4030-mixer.c
+@@ -0,0 +1,1040 @@
++/*
++ * sound/arm/omap/omap-audio-twl4030-mixer.c
++ *
++ * Codec driver for TWL4030 for OMAP processors
++ *
++ * Copyright (C) 2004-2007 Texas Instruments, Inc.
++ *
++ * This package is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * THIS PACKAGE IS PROVIDED ``AS IS'' AND WITHOUT ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED
++ * WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR A PARTICULAR PURPOSE.
++ *
++ * Contributors:
++ *	Nishanth Menon
++ *	Jian Zhang
++ *	Leonides Martinez
++ *	Hari Nagalla
++ *	Misael Lopez Cruz
++ */
++
++#include <linux/delay.h>
++#include <linux/pm.h>
++#include <linux/errno.h>
++#include <linux/sound.h>
++#include <linux/soundcard.h>
++#include <linux/uaccess.h>
++#include <linux/io.h>
++
++#include <asm/hardware.h>
++#include <asm/arch/dma.h>
++#include <asm/mach-types.h>
++
++#include <sound/core.h>
++#include <sound/initval.h>
++#include <sound/pcm.h>
++#include <sound/control.h>
++
++#include <asm/arch/omap-alsa.h>
++#include <linux/i2c/twl4030.h>
++#if defined(CONFIG_ARCH_OMAP243X) || defined(CONFIG_ARCH_OMAP3430)
++#include <asm/arch/mcbsp.h>
++#include <asm/arch/clock.h>
++#else
++#error "Unsupported configuration"
++#endif
++
++#include "omap-alsa-twl4030.h"
++
++/*
++ *  ALSA mixer Callback 'info' for Stereo Playback Volume Controls
++ */
++static int pcm_playback_volume_info(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_info *uinfo)
++{
++	uinfo->type			= SNDRV_CTL_ELEM_TYPE_INTEGER;
++	uinfo->count			= 2;
++	uinfo->value.integer.min	= 0;
++	uinfo->value.integer.max	= AUDIO_MAX_OUTPUT_VOLUME;
++
++	return 0;
++}
++
++/*
++ *  ALSA mixer Callback 'info' for Mono Playback Volume Controls
++ */
++static int pcm_mono_playback_volume_info(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_info *uinfo)
++{
++	uinfo->type			= SNDRV_CTL_ELEM_TYPE_INTEGER;
++	uinfo->count			= 1;
++	uinfo->value.integer.min	= 0;
++	uinfo->value.integer.max	= AUDIO_MAX_OUTPUT_VOLUME;
++
++	return 0;
++}
++
++/*
++ * Sidetone 'info'
++ */
++static int sidetone_volume_info(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_info *uinfo)
++{
++	uinfo->type			= SNDRV_CTL_ELEM_TYPE_INTEGER;
++	uinfo->count			= 1;
++	uinfo->value.integer.min	= 0;
++	uinfo->value.integer.max	= SIDETONE_MAX_GAIN;
++
++	return 0;
++}
++
++/*
++ * Alsa mixer interface function for getting the volume read from the DGC in a
++ * 0 -100 alsa mixer format.
++ */
++static int pcm_playback_volume_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.integer.value[0] =
++		READ_LEFT_VOLUME(twl4030_local.play_volume); /* L */
++	ucontrol->value.integer.value[1] =
++		READ_RIGHT_VOLUME(twl4030_local.play_volume);/* R */
++
++	return 0;
++}
++
++/*
++ * Alsa mixer interface function for setting the master playback volume
++ */
++static int pcm_playback_volume_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if ((READ_LEFT_VOLUME(twl4030_local.play_volume) !=
++					ucontrol->value.integer.value[0]) |
++	    (READ_RIGHT_VOLUME(twl4030_local.play_volume) !=
++					ucontrol->value.integer.value[1])) {
++		changed = twl4030_setvolume(OUTPUT_VOLUME,
++				ucontrol->value.integer.value[0],
++				ucontrol->value.integer.value[1]);
++		if (!changed)
++			changed = 1;
++	}
++
++	return changed;
++}
++
++/*
++ * Headset Get Volume
++ */
++static int headset_playback_volume_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.integer.value[0] =
++		READ_LEFT_VOLUME(twl4030_local.hset); /* L */
++	ucontrol->value.integer.value[1] =
++		READ_RIGHT_VOLUME(twl4030_local.hset);/* R */
++
++	return 0;
++}
++
++/*
++ * Headset Set Volume
++ */
++static int headset_playback_volume_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if ((READ_LEFT_VOLUME(twl4030_local.hset) !=
++					ucontrol->value.integer.value[0]) |
++	    (READ_RIGHT_VOLUME(twl4030_local.hset) !=
++					ucontrol->value.integer.value[1])) {
++		changed = twl4030_setvolume(OUTPUT_STEREO_HEADSET,
++				ucontrol->value.integer.value[0],
++				ucontrol->value.integer.value[1]);
++		if (!changed)
++			changed = 1;
++	}
++
++	return changed;
++}
++
++/*
++ * Switch info
++ */
++static int pcm_switch_info(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_info *uinfo)
++{
++	uinfo->type 			= SNDRV_CTL_ELEM_TYPE_BOOLEAN;
++	uinfo->count			= 1;
++	uinfo->value.integer.min	= 0;
++	uinfo->value.integer.max	= 1;
++
++	return 0;
++}
++
++/*
++ * Handsfree Switch Control
++ */
++static int handsfree_playback_switch_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	if (twl4030_local.current_output & OUTPUT_HANDS_FREE_CLASSD)
++		ucontrol->value.integer.value[0] =
++					((twl4030_local.handsfree_en) ? 1 : 0);
++	else
++		ucontrol->value.integer.value[0] = 0;
++
++	return 0;
++}
++
++static int handsfree_playback_switch_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if (ucontrol->value.integer.value[0] != (twl4030_local.handsfree_en)) {
++		if (ucontrol->value.integer.value[0])
++			twl4030_local.handsfree_en = 1;
++		else
++			twl4030_local.handsfree_en = 0;
++		changed = 1;
++	}
++
++	return changed;
++}
++
++/* Controls to set the T2 sample Rate */
++
++static int codec_samplerate_info(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_info *uinfo)
++{
++	uinfo->type			= SNDRV_CTL_ELEM_TYPE_INTEGER;
++	uinfo->count			= 1;
++	uinfo->value.integer.min	= 8000;
++	uinfo->value.integer.max	= 48000;
++
++	return 0;
++}
++
++static int codec_samplerate_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.integer.value[0] = twl4030_local.audio_samplerate;
++
++	return 0;
++}
++
++static int codec_samplerate_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if (ucontrol->value.integer.value[0] !=
++					(twl4030_local.audio_samplerate)) {
++		twl4030_set_samplerate(ucontrol->value.integer.value[0]);
++		changed = 1;
++	}
++
++	return changed;
++}
++
++
++/*
++ * Handset Earphone Control
++ */
++static int earphone_playback_volume_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.integer.value[0] =
++		READ_LEFT_VOLUME(twl4030_local.ear); /* L  Mono */
++
++	return 0;
++}
++
++static int earphone_playback_volume_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if (READ_LEFT_VOLUME(twl4030_local.ear) !=
++				ucontrol->value.integer.value[0]) {
++		changed = twl4030_setvolume(OUTPUT_MONO_EARPIECE,
++				ucontrol->value.integer.value[0], 0);
++		if (!changed)
++			changed = 1;
++	}
++
++	return changed;
++}
++
++
++/*
++ * Sidetone Volume Control
++ */
++static int sidetone_playback_volume_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.integer.value[0] = audio_twl4030_read(REG_VSTPGA);
++
++	return 0;
++}
++
++static int sidetone_playback_volume_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if (READ_LEFT_VOLUME(twl4030_local.sidetone) !=
++					ucontrol->value.integer.value[0]) {
++		changed = twl4030_setvolume(OUTPUT_SIDETONE,
++				ucontrol->value.integer.value[0], 0);
++		if (!changed)
++			changed = 1;
++	}
++
++	return changed;
++}
++
++/*
++ * Sidetone Switch Control
++ */
++static int sidetone_playback_switch_get(struct snd_kcontrol *kcontrol,
++					  struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.integer.value[0] =
++		 (audio_twl4030_read(REG_VSTPGA) ? 1 : 0);
++
++	return 0;
++}
++
++static int sidetone_playback_switch_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if (ucontrol->value.integer.value[0] !=
++			(audio_twl4030_read(REG_VSTPGA) ? 1 : 0)) {
++		if (ucontrol->value.integer.value[0]) {
++			/* Enable sidetone */
++			changed = audio_twl4030_write(REG_VSTPGA,
++							twl4030_local.sidetone);
++			if (changed) {
++				printk(KERN_ERR "Sidetone enable failed!\n");
++				return changed;
++			}
++		} else {
++			/* Disable sidetone = mute */
++			changed = audio_twl4030_write(REG_VSTPGA, 0);
++		}
++		if (!changed)
++			changed = 1;
++	}
++
++	return changed;
++}
++
++/*
++ * USB-Carkit Gain Control
++ */
++static int carkit_playback_volume_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.integer.value[0] =
++		READ_LEFT_VOLUME(twl4030_local.carkit_out); /* L */
++	ucontrol->value.integer.value[1] =
++		READ_RIGHT_VOLUME(twl4030_local.carkit_out);/* R */
++
++	return 0;
++}
++
++static int carkit_playback_volume_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if ((READ_LEFT_VOLUME(twl4030_local.carkit_out) !=
++					ucontrol->value.integer.value[0]) |
++	    (READ_RIGHT_VOLUME(twl4030_local.carkit_out) !=
++					ucontrol->value.integer.value[1])) {
++		changed = twl4030_setvolume(OUTPUT_CARKIT,
++				ucontrol->value.integer.value[0],
++				ucontrol->value.integer.value[1]);
++		if (!changed)
++			changed = 1;
++	}
++
++	return changed;
++}
++
++static int carkit_capture_volume_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.integer.value[0] =
++		READ_LEFT_VOLUME(twl4030_local.carkit_in); /* L  Mono */
++
++	return 0;
++}
++
++static int carkit_capture_volume_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if (READ_LEFT_VOLUME(twl4030_local.carkit_in) !=
++				ucontrol->value.integer.value[0]) {
++		changed = twl4030_setvolume(INPUT_CARKIT,
++				ucontrol->value.integer.value[0], 0);
++		if (!changed)
++			changed = 1;
++	}
++
++	return changed;
++}
++
++/*
++ *  Info callback for Stereo Capture Volume Controls
++ */
++static int pcm_capture_volume_info(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_info *uinfo)
++{
++	uinfo->type			= SNDRV_CTL_ELEM_TYPE_INTEGER;
++	uinfo->count			= 2;
++	uinfo->value.integer.min	= 0;
++	uinfo->value.integer.max	= AUDIO_MAX_INPUT_VOLUME;
++
++	return 0;
++}
++
++/*
++ *  Info callback for Mono Capture Volume Controls
++ */
++static int mono_capture_volume_info(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_info *uinfo)
++{
++	uinfo->type			= SNDRV_CTL_ELEM_TYPE_INTEGER;
++	uinfo->count			= 1;
++	uinfo->value.integer.min	= 0;
++	uinfo->value.integer.max	= AUDIO_MAX_INPUT_VOLUME;
++
++	return 0;
++}
++
++/*
++ * Master Capture Volume Control
++ */
++static int pcm_capture_volume_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.integer.value[0] =
++		READ_LEFT_VOLUME(twl4030_local.rec_volume); /* L */
++	ucontrol->value.integer.value[1] =
++		READ_RIGHT_VOLUME(twl4030_local.rec_volume); /* R */
++
++	return 0;
++}
++
++static int pcm_capture_volume_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if ((READ_LEFT_VOLUME(twl4030_local.rec_volume) !=
++					ucontrol->value.integer.value[0]) |
++	    (READ_RIGHT_VOLUME(twl4030_local.rec_volume) !=
++					ucontrol->value.integer.value[1])) {
++		changed =  twl4030_setvolume(INPUT_VOLUME,
++				ucontrol->value.integer.value[0],
++				ucontrol->value.integer.value[1]);
++		if (!changed)
++			changed = 1;
++	}
++
++	return changed;
++}
++
++/*
++ * Headset Mic Control
++ */
++static int hset_mic_capture_switch_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	if ((twl4030_local.current_input & INPUT_HEADSET_MIC) & 0x0F)
++		ucontrol->value.integer.value[0] =
++					((twl4030_local.hsmic_en) ? 1 : 0);
++	else
++		ucontrol->value.integer.value[0] = 0;
++
++	return 0;
++}
++
++static int hset_mic_capture_switch_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if (ucontrol->value.integer.value[0] != (twl4030_local.hsmic_en)) {
++		if (ucontrol->value.integer.value[0])
++			twl4030_local.hsmic_en = 1;
++		else
++			twl4030_local.hsmic_en = 0;
++		changed = 1;
++	}
++
++	return changed;
++}
++
++static int hset_mic_capture_volume_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.integer.value[0] =
++		READ_LEFT_VOLUME(twl4030_local.line); /* L */
++	ucontrol->value.integer.value[1] =
++		READ_RIGHT_VOLUME(twl4030_local.line); /* R */
++
++	return 0;
++}
++
++static int hset_mic_capture_volume_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if ((READ_LEFT_VOLUME(twl4030_local.line) !=
++					ucontrol->value.integer.value[0]) |
++	    (READ_RIGHT_VOLUME(twl4030_local.line) !=
++					ucontrol->value.integer.value[1])) {
++		changed = twl4030_setvolume(INPUT_HEADSET_MIC,
++				ucontrol->value.integer.value[0],
++				ucontrol->value.integer.value[1]);
++		if (!changed)
++			changed = 1;
++	}
++
++	return changed;
++}
++
++
++/*
++ * Main Mic Control (Mic 1)
++ */
++static int mic1_capture_volume_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.integer.value[0] =
++		READ_LEFT_VOLUME(twl4030_local.mic); /* L */
++
++	return 0;
++}
++
++static int mic1_capture_volume_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if (READ_LEFT_VOLUME(twl4030_local.mic) !=
++					ucontrol->value.integer.value[0]) {
++		changed =  twl4030_setvolume(INPUT_MAIN_MIC,
++					ucontrol->value.integer.value[0], 0);
++		if (!changed)
++			changed = 1;
++	}
++
++	return changed;
++}
++
++static int mic1_capture_switch_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	if ((twl4030_local.current_input & INPUT_MAIN_MIC) & 0x0F)
++		ucontrol->value.integer.value[0] =
++					((twl4030_local.main_mic_en) ? 1 : 0);
++	else
++		ucontrol->value.integer.value[0] = 0;
++
++	return 0;
++}
++
++static int mic1_capture_switch_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if (ucontrol->value.integer.value[0] != (twl4030_local.main_mic_en)) {
++		if (ucontrol->value.integer.value[0])
++			twl4030_local.main_mic_en = 1;
++		else
++			twl4030_local.main_mic_en = 0;
++		changed = 1;
++	}
++
++	return changed;
++}
++
++
++/*
++ * Sub-Mic Control (Mic 2)
++ */
++static int mic2_capture_switch_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	if ((twl4030_local.current_input & INPUT_SUB_MIC) & 0x0F)
++		ucontrol->value.integer.value[0] =
++					((twl4030_local.sub_mic_en) ? 1 : 0);
++
++	return 0;
++}
++
++static int mic2_capture_switch_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if (ucontrol->value.integer.value[0] != (twl4030_local.sub_mic_en)) {
++		if (ucontrol->value.integer.value[0])
++			twl4030_local.sub_mic_en = 1;
++		else
++			twl4030_local.sub_mic_en = 0;
++		changed = 1;
++	}
++
++	return changed;
++}
++
++static int mic2_capture_volume_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.integer.value[0] =
++		READ_RIGHT_VOLUME(twl4030_local.mic); /* R */
++
++	return 0;
++}
++
++static int mic2_capture_volume_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if (READ_RIGHT_VOLUME(twl4030_local.mic) !=
++					ucontrol->value.integer.value[0]) {
++		changed = twl4030_setvolume(INPUT_SUB_MIC, 0,
++					ucontrol->value.integer.value[0]);
++		if (!changed)
++			changed = 1;
++	}
++
++	return changed;
++}
++
++/*
++ * Auxiliary/FM Gain Control
++ */
++static int aux_capture_volume_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	ucontrol->value.integer.value[0] =
++		READ_LEFT_VOLUME(twl4030_local.aux); /* L */
++	ucontrol->value.integer.value[1] =
++		READ_RIGHT_VOLUME(twl4030_local.aux); /* R */
++
++	return 0;
++}
++
++static int aux_capture_volume_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++
++	if ((READ_LEFT_VOLUME(twl4030_local.aux) !=
++					ucontrol->value.integer.value[0]) |
++	    (READ_RIGHT_VOLUME(twl4030_local.aux) !=
++					ucontrol->value.integer.value[1])) {
++		changed = twl4030_setvolume(INPUT_AUX,
++				ucontrol->value.integer.value[0],
++				ucontrol->value.integer.value[1]);
++		if (!changed)
++			changed = 1;
++	}
++
++	return changed;
++}
++
++/* Output Source Selection */
++static int snd_playback_source_info(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_info *uinfo)
++{
++	static char *texts[4] = {"Stereo Headset",
++				"Hands-free (Speakers)",
++				"Mono Handset",
++				"USB CarKit"};
++
++	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
++	uinfo->count = 1;
++	uinfo->value.enumerated.items = 4;
++	if (uinfo->value.enumerated.item > 3)
++		uinfo->value.enumerated.item = 0;
++	strcpy(uinfo->value.enumerated.name,
++		texts[uinfo->value.enumerated.item]);
++
++	return 0;
++}
++
++static int snd_playback_source_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int val;
++
++	val = twl4030_local.outsrc;
++	if ((val & SOUND_MASK_LINE1) == SOUND_MASK_LINE1)
++		ucontrol->value.enumerated.item[0] = 0;
++	else if ((val & SOUND_MASK_SPEAKER) == SOUND_MASK_SPEAKER)
++		ucontrol->value.enumerated.item[0] = 1;
++	else if ((val & SOUND_MASK_PHONEOUT) == SOUND_MASK_PHONEOUT)
++		ucontrol->value.enumerated.item[0] = 2;
++	else if ((val & SOUND_MASK_CD) == SOUND_MASK_CD)
++		ucontrol->value.enumerated.item[0] = 3;
++
++	return 0;
++}
++
++static int snd_playback_source_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++	int ret;
++	int val = SOUND_MASK_LINE1;
++
++	if (ucontrol->value.enumerated.item[0] == 1)
++		val = SOUND_MASK_SPEAKER;
++	else if (ucontrol->value.enumerated.item[0] == 2)
++		val = SOUND_MASK_PHONEOUT;
++	else if (ucontrol->value.enumerated.item[0] == 3)
++		val = SOUND_MASK_CD;
++
++	ret = twl4030_codec_tog_on();
++	if (unlikely(ret)) {
++		printk(KERN_ERR "Codec power tog failed!\n");
++		return ret;
++	}
++	/* setup regs */
++	ret = twl4030_select_source(DIR_OUT, val);
++	if (unlikely(ret)) {
++		printk(KERN_ERR "Source selection failed!\n");
++		return ret;
++	}
++	ret = twl4030_codec_tog_on();
++	if (unlikely(ret)) {
++		printk(KERN_ERR "Codec power tog failed!\n");
++		return ret;
++	}
++	changed = 1;
++
++	return changed;
++}
++
++/* Input Source Selection */
++static int snd_capture_source_info(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_info *uinfo)
++{
++	static char *texts[4] = {"Headset Mic",
++				"Main Mic + Sub Mic",
++				"Aux/FM",
++				"USB CarKit"};
++
++	uinfo->type = SNDRV_CTL_ELEM_TYPE_ENUMERATED;
++	uinfo->count = 1;
++	uinfo->value.enumerated.items = 4;
++	if (uinfo->value.enumerated.item > 3)
++		uinfo->value.enumerated.item = 0;
++	strcpy(uinfo->value.enumerated.name,
++		texts[uinfo->value.enumerated.item]);
++
++	return 0;
++}
++
++static int snd_capture_source_get(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int val;
++
++	val = twl4030_local.recsrc;
++	if ((val & SOUND_MASK_LINE) == SOUND_MASK_LINE)
++		ucontrol->value.enumerated.item[0] = 0;
++	else if ((val & SOUND_MASK_MIC) == SOUND_MASK_MIC)
++		ucontrol->value.enumerated.item[0] = 1;
++	else if ((val & SOUND_MASK_RADIO) == SOUND_MASK_RADIO)
++		ucontrol->value.enumerated.item[0] = 2;
++	else if ((val & SOUND_MASK_CD) == SOUND_MASK_CD)
++		ucontrol->value.enumerated.item[0] = 3;
++
++	return 0;
++}
++
++static int snd_capture_source_put(struct snd_kcontrol *kcontrol,
++					struct snd_ctl_elem_value *ucontrol)
++{
++	int changed = 0;
++	int ret;
++	int val = SOUND_MASK_LINE;
++
++	if (ucontrol->value.enumerated.item[0] == 1)
++		val = SOUND_MASK_MIC;
++	else if (ucontrol->value.enumerated.item[0] == 2)
++		val = SOUND_MASK_RADIO;
++	else if (ucontrol->value.enumerated.item[0] == 3)
++		val = SOUND_MASK_CD;
++
++	ret = twl4030_codec_tog_on();
++	if (unlikely(ret)) {
++		printk(KERN_ERR "Codec power tog failed!\n");
++		return ret;
++	}
++	/* setup regs */
++	ret = twl4030_select_source(DIR_IN, val);
++	if (unlikely(ret)) {
++		printk(KERN_ERR "Source selection failed!\n");
++		return ret;
++	}
++	ret = twl4030_codec_tog_on();
++	if (unlikely(ret)) {
++		printk(KERN_ERR "Codec power tog failed!\n");
++		return ret;
++	}
++	changed = 1;
++
++	return changed;
++}
++
++
++/* Controls Registered */
++
++static struct snd_kcontrol_new twl4030_control[] __devinitdata = {
++	/* Output Control*/
++	{
++		.name   = "T2 Master codec Sample Rate",
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = codec_samplerate_info,
++		.get    = codec_samplerate_get,
++		.put    = codec_samplerate_put,
++	},
++	{
++		.name   = "Master Playback Volume",
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = pcm_playback_volume_info,
++		.get    = pcm_playback_volume_get,
++		.put    = pcm_playback_volume_put,
++	},
++	{
++		.name   = "Handset Playback Volume",	/* Mono */
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = pcm_mono_playback_volume_info,
++		.get    = earphone_playback_volume_get,
++		.put    = earphone_playback_volume_put,
++	},
++	{
++		.name   = "Hands-free Playback Switch",	/* ClassD */
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = pcm_switch_info,
++		.get    = handsfree_playback_switch_get,
++		.put    = handsfree_playback_switch_put,
++	},
++	{
++		.name   = "Headset Playback Volume",	/* Line 1*/
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = pcm_playback_volume_info,
++		.get    = headset_playback_volume_get,
++		.put    = headset_playback_volume_put,
++	},
++	/* Sidetone Gain */
++	{
++		.name   = "Sidetone Playback Switch",
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = pcm_switch_info,
++		.get    = sidetone_playback_switch_get,
++		.put    = sidetone_playback_switch_put,
++	},
++	{
++		.name   = "Sidetone Playback Volume",
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = sidetone_volume_info,
++		.get    = sidetone_playback_volume_get,
++		.put    = sidetone_playback_volume_put,
++	},
++	{
++		.name   = "USB-Carkit Playback Volume",	/* USB Carkit Output */
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = pcm_playback_volume_info,
++		.get    = carkit_playback_volume_get,
++		.put    = carkit_playback_volume_put,
++	},
++	/* Input Control */
++	{
++		.name   = "Master Capture Volume",
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = pcm_capture_volume_info,
++		.get    = pcm_capture_volume_get,
++		.put    = pcm_capture_volume_put,
++	},
++	{
++		.name   = "Mic Headset Capture Switch",	/* HS Mic */
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = pcm_switch_info,
++		.get    = hset_mic_capture_switch_get,
++		.put    = hset_mic_capture_switch_put,
++	},
++	{
++		.name   = "Mic Headset Capture Volume",
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,	/* HS Mic */
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = pcm_capture_volume_info,
++		.get    = hset_mic_capture_volume_get,
++		.put    = hset_mic_capture_volume_put,
++	},
++	{
++		.name   = "Mic Main Capture Switch",	/* Mic 1 */
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = pcm_switch_info,
++		.get    = mic1_capture_switch_get,
++		.put    = mic1_capture_switch_put,
++	},
++	{
++		.name   = "Mic Main Capture Volume",	/* Mic 1 */
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = mono_capture_volume_info,
++		.get    = mic1_capture_volume_get,
++		.put    = mic1_capture_volume_put,
++	},
++	{
++		.name   = "Mic Sub Capture Switch",	/* Mic 2 */
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = pcm_switch_info,
++		.get    = mic2_capture_switch_get,
++		.put    = mic2_capture_switch_put,
++	},
++	{
++		.name   = "Mic Sub Capture Volume",	/* Mic 2 */
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = mono_capture_volume_info,
++		.get    = mic2_capture_volume_get,
++		.put    = mic2_capture_volume_put,
++	},
++	{
++		.name   = "Aux/FM Capture Volume",	/* Aux/FM */
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = pcm_capture_volume_info,
++		.get    = aux_capture_volume_get,
++		.put    = aux_capture_volume_put,
++	},
++	{
++		.name   = "USB-Carkit Capture Volume",	/* USB Carkit Input */
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = mono_capture_volume_info,
++		.get    = carkit_capture_volume_get,
++		.put    = carkit_capture_volume_put,
++	},
++	/* Input Source Selection*/
++	{
++		.name   = "Capture Source",	/* Input Source */
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = snd_capture_source_info,
++		.get    = snd_capture_source_get,
++		.put    = snd_capture_source_put,
++	},
++	/* Output Source Selection */
++	{
++		.name   = "Playback Source",	/* Output Source */
++		.iface  = SNDRV_CTL_ELEM_IFACE_MIXER,
++		.index  = 0,
++		.access = SNDRV_CTL_ELEM_ACCESS_READWRITE,
++		.info   = snd_playback_source_info,
++		.get    = snd_playback_source_get,
++		.put    = snd_playback_source_put,
++	},
++};
++
++#ifdef CONFIG_PM
++void snd_omap_suspend_mixer(void)
++{
++}
++
++void snd_omap_resume_mixer(void)
++{
++}
++#endif
++
++void snd_omap_init_mixer(void)
++{
++	/* Nothing to do for 3430 platform */
++}
++EXPORT_SYMBOL(snd_omap_init_mixer);
++
++int snd_omap_mixer(struct snd_card_omap_codec *chip)
++{
++	struct snd_card *card;
++	int i = 0;
++	int err = 0;
++
++	card = chip->card;
++
++	strcpy(card->mixername, MIXER_NAME);
++
++
++	for (i = 0; i < ARRAY_SIZE(twl4030_control); i++) {
++		err = snd_ctl_add(card,
++				snd_ctl_new1(&twl4030_control[i], card));
++		if (err < 0)
++			return err;
++	}
++	return 0;
++}
++EXPORT_SYMBOL(snd_omap_mixer);
++
++int snd_omap_mixer_shutdown(struct snd_card_omap_codec *chip)
++{
++	return 0;
++}
++EXPORT_SYMBOL(snd_omap_mixer_shutdown);
++
++MODULE_AUTHOR("Texas Instruments");
++MODULE_DESCRIPTION("Codec audio driver for the TI TWL4030 codec.");
++MODULE_LICENSE("GPL");
+diff --git a/sound/arm/omap/omap-alsa-twl4030.c b/sound/arm/omap/omap-alsa-twl4030.c
+new file mode 100644
+index 0000000..371f9f4
+--- /dev/null
++++ b/sound/arm/omap/omap-alsa-twl4030.c
+@@ -0,0 +1,2105 @@
++/*
++ * sound/arm/omap/omap-audio-twl4030.c
++ *
++ * Codec driver for TWL4030 for OMAP processors
++ *
++ * Copyright (C) 2004-2007 Texas Instruments, Inc.
++ *
++ * This package is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * THIS PACKAGE IS PROVIDED ``AS IS'' AND WITHOUT ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED
++ * WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR A PARTICULAR PURPOSE.
++ *
++ * Contributors:
++ *	Nishant Menon
++ * 	Jian Zhang
++ *	Hari Nagalla
++ *	Misael Lopez Cruz
++ */
++
++#include <linux/module.h>
++#include <linux/delay.h>
++#include <linux/errno.h>
++#include <linux/sound.h>
++#include <linux/soundcard.h>
++
++#include <asm/hardware.h>
++#include <asm/mach-types.h>
++
++#include <sound/core.h>
++#include <sound/initval.h>
++#include <sound/pcm.h>
++#include <sound/control.h>
++
++#include <asm/arch/omap-alsa.h>
++#include <linux/i2c/twl4030.h>
++#if defined(CONFIG_ARCH_OMAP243X) || defined(CONFIG_ARCH_OMAP3430)
++#include <asm/arch/mcbsp.h>
++#include <asm/arch/clock.h>
++#else
++#error "Unsupported configuration"
++#endif
++
++#include "omap-alsa-twl4030.h"
++#include "omap-alsa-dma.h"
++
++/******************************** Debug Macros ********************************/
++/* To generate a rather shrill tone -test the entire path */
++#undef TONE_GEN
++/* To dump the twl registers for debug */
++#undef TWL_DUMP_REGISTERS
++#undef TWL_DUMP_REGISTERS_MCBSP
++#undef DEBUG
++
++#ifdef TWL_DUMP_REGISTERS
++static void twl4030_dump_registers(void);
++#endif
++#ifdef TONE_GEN
++static void generate_tone(void);
++#endif
++
++static char twl4030_configured;		/* Configured count */
++static int mixer_dev_id;
++#ifndef CONFIG_MACH_OMAP3EVM
++static int gpio_ext_mut_acquired;
++#endif
++
++int mcbsp_interface_acquired = 0;
++
++/*******************************************************************************
++ *
++ * Module data structures
++ *
++ ******************************************************************************/
++
++static unsigned int twl4030_rates[] = {
++	8000, 11025, 12000,
++	16000, 22050, 24000,
++	32000, 44100, 48000
++};
++
++static struct snd_pcm_hw_constraint_list twl4030_pcm_hw_constraint_list = {
++	.count = ARRAY_SIZE(twl4030_rates),
++	.list = twl4030_rates,
++	.mask = 0,
++};
++
++static struct snd_pcm_hardware twl4030_pcm_hardware_playback = {
++	.info = (SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER |
++		 SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_MMAP_VALID |
++		 SNDRV_PCM_INFO_PAUSE | SNDRV_PCM_INFO_RESUME),
++	.formats = (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE),
++	.rates = (SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_11025 |
++		  SNDRV_PCM_RATE_16000 |
++		  SNDRV_PCM_RATE_22050 | SNDRV_PCM_RATE_32000 |
++		  SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000 |
++		  SNDRV_PCM_RATE_KNOT),
++	.rate_min = 8000,
++	.rate_max = 48000,
++	.channels_min = 1,
++	.channels_max = 2,
++	.buffer_bytes_max = 128 * 1024,
++	.period_bytes_min = 32,
++	.period_bytes_max = 8 * 1024,
++	.periods_min = 16,
++	.periods_max = 255,
++	.fifo_size = 0,
++};
++
++static struct snd_pcm_hardware twl4030_pcm_hardware_capture = {
++	.info = (SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER |
++		 SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_MMAP_VALID |
++		 SNDRV_PCM_INFO_PAUSE | SNDRV_PCM_INFO_RESUME),
++	.formats = (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE),
++	.rates = (SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_11025 |
++		  SNDRV_PCM_RATE_16000 |
++		  SNDRV_PCM_RATE_22050 | SNDRV_PCM_RATE_32000 |
++		  SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000 |
++		  SNDRV_PCM_RATE_KNOT),
++	.rate_min = 8000,
++	.rate_max = 48000,
++	.channels_min = 1,
++	.channels_max = 2,
++	.buffer_bytes_max = 128 * 1024,
++	.period_bytes_min = 32,
++	.period_bytes_max = 8 * 1024,
++	.periods_min = 16,
++	.periods_max = 255,
++	.fifo_size = 0,
++};
++
++/* Hint - optimization wise move the most used values up the list */
++static const struct sample_rate_info_t valid_sample_rates[] = {
++	{.rate = 8000, .apll = AUDIO_MODE_RATE_08_000},
++	{.rate = 16000, .apll = AUDIO_MODE_RATE_16_000},
++	{.rate = 44100, .apll = AUDIO_MODE_RATE_44_100},
++	{.rate = 11025, .apll = AUDIO_MODE_RATE_11_025},
++	{.rate = 12000, .apll = AUDIO_MODE_RATE_12_000},
++	{.rate = 22050, .apll = AUDIO_MODE_RATE_22_050},
++	{.rate = 24000, .apll = AUDIO_MODE_RATE_24_000},
++	{.rate = 32000, .apll = AUDIO_MODE_RATE_32_000},
++	{.rate = 48000, .apll = AUDIO_MODE_RATE_48_000},
++	/* Dont support 96Khz -requires HSCLK >26Mhz
++	   { .rate = 96000, .apll = AUDIO_MODE_RATE_96_000 }, */
++};
++
++struct codec_local_info twl4030_local = {
++	.play_volume =  WRITE_LR_VOLUME(DEFAULT_OUTPUT_VOLUME),
++	.rec_volume = WRITE_LR_VOLUME(DEFAULT_INPUT_VOLUME),
++	.line = WRITE_LR_VOLUME(DEFAULT_INPUT_LINE_VOLUME),
++	.mic = WRITE_LR_VOLUME(DEFAULT_INPUT_MIC_VOLUME),
++	.aux = WRITE_LR_VOLUME(DEFAULT_INPUT_LINE_VOLUME),
++	.hset = WRITE_LR_VOLUME(DEFAULT_OUTPUT_HSET_VOLUME),
++	.classd = WRITE_LR_VOLUME(DEFAULT_OUTPUT_SPK_VOLUME),
++	.ear = WRITE_LEFT_VOLUME(DEFAULT_OUTPUT_EAR_VOLUME),
++	.sidetone = WRITE_LEFT_VOLUME(DEFAULT_SIDETONE_VOLUME),
++	.carkit_out = WRITE_LR_VOLUME(DEFAULT_OUTPUT_CARKIT_VOLUME),
++	.carkit_in = WRITE_LEFT_VOLUME(DEFAULT_INPUT_CARKIT_VOLUME),
++	.handsfree_en = 1,
++	.hsmic_en = 1,
++	.main_mic_en = 1,
++	.sub_mic_en = 1,
++	.current_input = DEFAULT_INPUT_TWL_DEVICE,
++	.current_output = DEFAULT_OUTPUT_TWL_DEVICE,
++	.audio_samplerate = AUDIO_RATE_DEFAULT,
++	.current_bitspersample = AUDIO_SAMPLE_DATA_WIDTH_16,
++	.current_stereomode = STEREO_MODE,
++	.recsrc = DEFAULT_INPUT_LNX_DEVICE,
++	.outsrc = DEFAULT_OUTPUT_LNX_DEVICE,
++	.mod_cnt = 0,
++};
++
++/*
++ * The TWL4030 will always use stereo I2S protocol to communicate
++ *
++ * McBSP Configuration Required:
++ * Stereo 16 bit:(default)
++ * -------------
++ * Single phase, FSYNC=Rising, words=1 DMA->Normal,32bit DXR
++ *
++ * Stereo 24 bit:
++ * -------------
++ * Single phase, FSYNC=Falling, words=2 DMA->Normal,32bit DXR
++ *
++ * Mono 16 bit:
++ * ------------
++ * Single phase, FSYNC=Rising, words=1 DMA->Normal,16 bit DXR+2
++ * OR
++ * Single phase, FSYNC=Falling, words=1 DMA->Normal,32bit DXR
++ *
++ * Mono 24 bit:
++ * ------------
++ * Single phase, FSYNC=Falling, words=2 DMA-> ei=1,fi=-1,32bit DXR
++ *
++ */
++
++struct codec_mcbsp_settings twl4030_mcbsp_settings = {
++	.audio_mcbsp_tx_transfer_params = {
++		.skip_alt = OMAP_MCBSP_SKIP_NONE,
++		.auto_reset = OMAP_MCBSP_AUTO_XRST,
++		.callback = twl4030_mcbsp_dma_cb,
++		.word_length1 = OMAP_MCBSP_WORD_32
++	},
++	.audio_mcbsp_rx_transfer_params = {
++		.skip_alt = OMAP_MCBSP_SKIP_NONE,
++		.auto_reset = OMAP_MCBSP_AUTO_RRST,
++		.callback = twl4030_mcbsp_dma_cb,
++		.word_length1 = OMAP_MCBSP_WORD_32
++	},
++	.audio_mcbsp_tx_cfg_param = {
++#ifdef TWL_MASTER
++		.fsync_src = OMAP_MCBSP_TXFSYNC_EXTERNAL,
++		.clk_mode = OMAP_MCBSP_CLKTXSRC_EXTERNAL,
++#else
++		.fsync_src = OMAP_MCBSP_TXFSYNC_INTERNAL,
++		.clk_mode = OMAP_MCBSP_CLKTXSRC_INTERNAL,
++#endif
++		.fs_polarity = OMAP_MCBSP_CLKX_POLARITY_RISING,
++		.clk_polarity = OMAP_MCBSP_FS_ACTIVE_LOW,
++		.frame_length1 = OMAP_MCBSP_FRAMELEN_N(1),
++		.word_length1 = OMAP_MCBSP_WORD_32,
++		.justification = OMAP_MCBSP_RJUST_ZEROMSB,
++		.reverse_compand = OMAP_MCBSP_MSBFIRST,
++		.phase = OMAP_MCBSP_FRAME_SINGLEPHASE,
++		.data_delay = OMAP_MCBSP_DATADELAY1
++	},
++	.audio_mcbsp_rx_cfg_param = {
++#ifdef TWL_MASTER
++		.fsync_src = OMAP_MCBSP_RXFSYNC_EXTERNAL,
++		.clk_mode = OMAP_MCBSP_CLKRXSRC_EXTERNAL,
++#else
++		.fsync_src = OMAP_MCBSP_RXFSYNC_INTERNAL,
++		.clk_mode = OMAP_MCBSP_CLKRXSRC_INTERNAL,
++#endif
++		.fs_polarity = OMAP_MCBSP_CLKR_POLARITY_RISING,
++		.clk_polarity = OMAP_MCBSP_FS_ACTIVE_LOW,
++		.frame_length1 = OMAP_MCBSP_FRAMELEN_N(1),
++		.word_length1 = OMAP_MCBSP_WORD_32,
++		.justification = OMAP_MCBSP_RJUST_ZEROMSB,
++		.reverse_compand = OMAP_MCBSP_MSBFIRST,
++		.phase = OMAP_MCBSP_FRAME_SINGLEPHASE,
++		.data_delay = OMAP_MCBSP_DATADELAY1
++	},
++	.audio_mcbsp_srg_fsg_cfg = {
++		.period = 0,
++		.pulse_width = 0,
++		.fsgm = 0,
++		.sample_rate = 0,
++		.bits_per_sample = 0,
++		.srg_src = OMAP_MCBSP_SRGCLKSRC_CLKX,
++#ifdef TWL_MASTER
++		.sync_mode = OMAP_MCBSP_SRG_FREERUNNING,
++#else
++		.sync_mode = OMAP_MCBSP_SRG_RUNNING,
++#endif
++		.polarity = OMAP_MCBSP_CLKX_POLARITY_FALLING,
++		.dlb = 0
++	}
++};
++
++/******************************************************************************
++ *
++ * Common APIs
++ *
++ *****************************************************************************/
++
++inline int audio_twl4030_write(u8 address, u8 data)
++{
++	int ret = 0;
++
++	ret = twl4030_i2c_write_u8(TWL4030_MODULE_AUDIO_VOICE, data, address);
++	if (ret >= 0) {
++		ret = 0;
++	} else {
++		printk(KERN_ERR "TWL4030:Audio:Write[0x%x] Error %d\n",
++			address, ret);
++	}
++
++	return ret;
++}
++
++inline int audio_twl4030_read(u8 address)
++{
++	u8 data;
++	int ret = 0;
++
++	ret = twl4030_i2c_read_u8(TWL4030_MODULE_AUDIO_VOICE, &data, address);
++	if (ret >= 0) {
++		ret = data;
++	} else {
++		printk(KERN_ERR "TWL4030:Audio:Read[0x%x] Error %d\n",
++			address, ret);
++	}
++	return ret;
++}
++
++/*******************************************************************************
++ *
++ * Codec util APIs
++ *
++ ******************************************************************************/
++
++#ifndef CONFIG_MACH_OMAP3EVM
++/*
++ * Configure GPIO for data out
++ */
++inline int twl4030_ext_mut_conf(void)
++{
++	int ret;
++
++	/* External mute gpio already acquired */
++	if (gpio_ext_mut_acquired)
++		return 0;
++
++	ret = twl4030_request_gpio(TWL4030_AUDIO_EXT_MUT);
++	if (ret)
++		return ret;
++
++	gpio_ext_mut_acquired = 1;
++	ret = twl4030_set_gpio_direction(TWL4030_AUDIO_EXT_MUT, 0);
++
++	return ret;
++}
++
++/*
++ * Unconfigure GPIO used for external mute
++ */
++static inline int twl4030_ext_mut_unconf(void)
++{
++	int ret;
++
++	ret = twl4030_free_gpio(TWL4030_AUDIO_EXT_MUT);
++	if (!ret)
++		gpio_ext_mut_acquired = 0;
++	return ret;
++}
++/*
++ * Disable mute also handle time of wait
++ */
++inline int twl4030_ext_mut_off(void)
++{
++	/* Wait for ramp duration, settling time for signal */
++	udelay(1);
++
++	/* Clear mute */
++	return twl4030_set_gpio_dataout(TWL4030_AUDIO_EXT_MUT, 0);
++}
++
++/*
++ * Enable mute
++ */
++inline int twl4030_ext_mut_on(void)
++{
++	return twl4030_set_gpio_dataout(TWL4030_AUDIO_EXT_MUT, 1);
++
++}
++#endif
++
++/*
++ * twl4030_codec_on
++ */
++static inline int twl4030_codec_on(void)
++{
++	int data = audio_twl4030_read(REG_CODEC_MODE);
++
++	if (unlikely(data < 0)) {
++		printk(KERN_ERR "Reg read failed\n");
++		return data;
++	}
++	if (unlikely(data & BIT_CODEC_MODE_CODECPDZ_M))
++		return 0;
++
++	data |= BIT_CODEC_MODE_CODECPDZ_M;
++
++	return audio_twl4030_write(REG_CODEC_MODE, (u8)data);
++}
++
++/*
++ * Switch off the codec
++ */
++static inline int twl4030_codec_off(void)
++{
++	int data = audio_twl4030_read(REG_CODEC_MODE);
++
++	if (unlikely(data < 0)) {
++		printk(KERN_ERR "Reg read failed\n");
++		return data;
++	}
++	/* Expected to be already off at bootup - but
++	 * we do not know the status of the device
++	 * hence would like to force a shut down
++	 */
++	if (unlikely(!(data & BIT_CODEC_MODE_CODECPDZ_M)))
++		return 0;
++	data &= ~BIT_CODEC_MODE_CODECPDZ_M;
++
++	return audio_twl4030_write(REG_CODEC_MODE, (u8)data);
++}
++
++/*
++ * Set the power to on after toggle to off and then on
++ */
++int twl4030_codec_tog_on(void)
++{
++	int ret = 0;
++	int data = audio_twl4030_read(REG_CODEC_MODE);
++
++	if (unlikely(data < 0)) {
++		printk(KERN_ERR "Reg read failed\n");
++		return data;
++	}
++	data &= ~BIT_CODEC_MODE_CODECPDZ_M;
++	ret =  audio_twl4030_write(REG_CODEC_MODE, (u8)data);
++	if (ret) {
++		printk(KERN_ERR "Codec write failed ! %d\n", ret);
++		return ret;
++	}
++	udelay(10); /* 10 ms delay for power settling */
++	data |= BIT_CODEC_MODE_CODECPDZ_M;
++	ret =  audio_twl4030_write(REG_CODEC_MODE, (u8) data);
++	udelay(10); /* 10 ms delay for power settling */
++
++	return ret;
++}
++
++/*
++ * Enable the output path
++ *  * NOTE * Codec power must be shut down during before this call
++ *  * NOTE * This does not take care of gain settings for the specified output
++ */
++static int twl4030_enable_output(void)
++{
++	u8 ear_ctl = 0;
++	u8 hs_ctl = 0;
++	u8 hs_pop = 0;
++	u8 hf_ctll = 0;
++	u8 hf_ctlr = 0;
++	u8 dac_ctl = 0;
++	u8 ck_ctll = 0;
++	u8 ck_ctlr = 0;
++	u8 opt = 0;
++	u32 line = 0;
++	int ret = 0;
++
++	opt = audio_twl4030_read(REG_OPTION) & ~(BIT_OPTION_ARXR2_EN_M |
++					       BIT_OPTION_ARXL2_EN_M);
++
++	/* AR2 and AL2 are active for I2S */
++	if ((twl4030_local.current_output & OUTPUT_STEREO_HEADSET) ==
++			OUTPUT_STEREO_HEADSET) {
++		hs_ctl |= BIT_HS_SEL_HSOR_AR2_EN_M | BIT_HS_SEL_HSOL_AL2_EN_M;
++		/* POP control - VMID? */
++		hs_pop = BIT_HS_POPN_SET_VMID_EN_M;
++		dac_ctl = BIT_AVDAC_CTL_ADACL2_EN_M | BIT_AVDAC_CTL_ADACR2_EN_M;
++		opt |= BIT_OPTION_ARXR2_EN_M | BIT_OPTION_ARXL2_EN_M;
++	}
++	if ((twl4030_local.current_output & OUTPUT_HANDS_FREE_CLASSD) ==
++			OUTPUT_HANDS_FREE_CLASSD) {
++		if (twl4030_local.handsfree_en) {
++			hf_ctll |=
++			    HANDS_FREEL_AL2 << BIT_HFL_CTL_HFL_INPUT_SEL |
++			    BIT_HFL_CTL_HFL_REF_EN_M;
++			hf_ctlr |=
++			    HANDS_FREER_AR2 << BIT_HFR_CTL_HFR_INPUT_SEL |
++			    BIT_HFR_CTL_HFR_REF_EN_M;
++		}
++		dac_ctl = BIT_AVDAC_CTL_ADACL2_EN_M | BIT_AVDAC_CTL_ADACR2_EN_M;
++		opt |= BIT_OPTION_ARXR2_EN_M | BIT_OPTION_ARXL2_EN_M;
++	}
++	if ((twl4030_local.current_output & OUTPUT_MONO_EARPIECE) ==
++			OUTPUT_MONO_EARPIECE) {
++		/* only AL2 comes in case of i2s */
++		ear_ctl |= BIT_EAR_CTL_EAR_AL2_EN_M;
++		dac_ctl = BIT_AVDAC_CTL_ADACL2_EN_M;
++		opt |= BIT_OPTION_ARXL2_EN_M;
++	}
++	if ((twl4030_local.current_output & OUTPUT_CARKIT) ==
++			OUTPUT_CARKIT) {
++		ck_ctll |= BIT_PRECKL_CTL_PRECKL_AL2_EN_M
++					| BIT_PRECKL_CTL_PRECKL_EN_M;
++		ck_ctlr |= BIT_PRECKR_CTL_PRECKR_AR2_EN_M
++					| BIT_PRECKR_CTL_PRECKR_EN_M;
++		dac_ctl = BIT_AVDAC_CTL_ADACL2_EN_M
++					| BIT_AVDAC_CTL_ADACR2_EN_M;
++		opt |= BIT_OPTION_ARXL2_EN_M | BIT_OPTION_ARXR2_EN_M;
++	}
++	if (opt) {
++		ret = audio_twl4030_write(REG_OPTION, opt);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++	}
++	if (ear_ctl) {
++		u8 temp;
++		temp = audio_twl4030_read(REG_EAR_CTL);
++		ear_ctl |= temp;
++		ret = audio_twl4030_write(REG_EAR_CTL, ear_ctl);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++	}
++	if (hs_ctl) {
++		ret = audio_twl4030_write(REG_HS_SEL, hs_ctl);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++	}
++	if (hs_pop) {
++		/* IMPORTANT: The following sequence is *required*
++		 * for starting the headset- esp for
++		 * ensuring the existance of the negative phase of
++		 * analog signal
++		 */
++		ret = audio_twl4030_write(REG_HS_POPN_SET, hs_pop);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++		hs_pop |= BIT_HS_POPN_SET_RAMP_EN_M;
++		udelay(1); /* Require a short delay before enabling ramp */
++		ret = audio_twl4030_write(REG_HS_POPN_SET, hs_pop);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++	}
++	/* IMPORTANT: The following sequence is *required*
++	 * for starting the speakers!
++	 */
++	if (hf_ctll) {
++		ret = audio_twl4030_write(REG_HFL_CTL, hf_ctll);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++		hf_ctll |= BIT_HFL_CTL_HFL_RAMP_EN_M;
++		ret = audio_twl4030_write(REG_HFL_CTL, hf_ctll);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++		hf_ctll |= BIT_HFL_CTL_HFL_LOOP_EN_M;
++		ret = audio_twl4030_write(REG_HFL_CTL, hf_ctll);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++		hf_ctll |= BIT_HFL_CTL_HFL_HB_EN_M;
++		ret = audio_twl4030_write(REG_HFL_CTL, hf_ctll);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++	}
++	if (hf_ctlr) {
++		ret = audio_twl4030_write(REG_HFR_CTL, hf_ctlr);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++		hf_ctlr |= BIT_HFR_CTL_HFR_RAMP_EN_M;
++		ret = audio_twl4030_write(REG_HFR_CTL, hf_ctlr);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++		hf_ctlr |= BIT_HFR_CTL_HFR_LOOP_EN_M;
++		ret = audio_twl4030_write(REG_HFR_CTL, hf_ctlr);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++		hf_ctlr |= BIT_HFR_CTL_HFR_HB_EN_M;
++		ret = audio_twl4030_write(REG_HFR_CTL, hf_ctlr);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++	}
++	if (dac_ctl) {
++		/* I2S should go thru DACR2, DACL2- unless we are on mono */
++		if (twl4030_local.current_stereomode == MONO_MODE)
++			dac_ctl &= ~BIT_AVDAC_CTL_ADACR2_EN_M;
++		ret = audio_twl4030_write(REG_AVDAC_CTL, dac_ctl);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++	}
++	if (ck_ctll) {
++		ret = audio_twl4030_write(REG_PRECKL_CTL, ck_ctll);
++		if (ret) {
++			line = __LINE__;
++			goto enable_op_exit;
++		}
++	}
++	if (ck_ctlr)
++		ret = audio_twl4030_write(REG_PRECKR_CTL, ck_ctlr);
++enable_op_exit:
++	if (ret)
++		printk(KERN_ERR "Error in Enable output[%d] in Line %d\n",
++			ret, line);
++	return ret;
++}
++
++/*
++ * Remove the output path
++ *  * NOTE * Shut down the codec before attempting this
++ */
++static int twl4030_disable_output(void)
++{
++	int ret = 0;
++	int line = 0;
++	u8 read_reg;
++
++	read_reg = audio_twl4030_read(REG_PRECKR_CTL);
++	/* To preserve gain settings */
++	read_reg &= BIT_PRECKR_CTL_PRECKR_GAIN_M;
++	ret = audio_twl4030_write(REG_PRECKR_CTL, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto disable_op_exit;
++	}
++	read_reg = audio_twl4030_read(REG_PRECKL_CTL);
++	/* To preserve gain settings */
++	read_reg &= BIT_PRECKL_CTL_PRECKL_GAIN_M;
++	ret = audio_twl4030_write(REG_PRECKL_CTL, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto disable_op_exit;
++	}
++	ret = audio_twl4030_write(REG_PREDR_CTL, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto disable_op_exit;
++	}
++	ret = audio_twl4030_write(REG_PREDL_CTL, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto disable_op_exit;
++	}
++	read_reg = audio_twl4030_read(REG_EAR_CTL);
++	/* To preserve gain settings */
++	read_reg &= BIT_EAR_CTL_EAR_GAIN_M;
++	ret = audio_twl4030_write(REG_EAR_CTL, read_reg);
++	if (ret) {
++		line = __LINE__;
++		goto disable_op_exit;
++	}
++	ret = audio_twl4030_write(REG_HS_SEL, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto disable_op_exit;
++	}
++	ret = audio_twl4030_write(REG_HFL_CTL, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto disable_op_exit;
++	}
++	ret = audio_twl4030_write(REG_HFR_CTL, 0x0);
++disable_op_exit:
++	if (ret)
++		printk(KERN_ERR "Disable Output Error [%d] in Line %d\n", ret,
++		       line);
++	return ret;
++}
++
++/*
++ * Enable the input to the correct device.
++ * Enable all the ADCs and path settings
++ *  * NOTE * This will not set the gain
++ * Reason being that the gain setting can be done with CODEC power down
++ *  * NOTE * This should be called with codec power down
++ */
++static int twl4030_enable_input(void)
++{
++	u8 micbias_ctl = 0;
++	u8 mic_en1 = 0;
++	u8 mic_en2 = 0;
++	u8 adc = 0;
++	int ret = 0;
++	u8 opt_ip = 0;
++	int line = 0;
++
++	ret = audio_twl4030_read(REG_OPTION);
++	if (ret < 0)
++		goto enable_ip_exit;
++
++	/* Dont use path1/path2 left and right.. we will enable it later.. */
++	opt_ip =
++	    (ret &
++	     ~(BIT_OPTION_ATXL1_EN_M | BIT_OPTION_ATXR1_EN_M |
++	       BIT_OPTION_ATXL2_VTXL_EN_M | BIT_OPTION_ATXR2_VTXR_EN_M));
++
++	/* HS MIC */
++	if ((twl4030_local.current_input & INPUT_HEADSET_MIC) ==
++			INPUT_HEADSET_MIC) {
++		/* Mono Path */
++		if (twl4030_local.hsmic_en) {
++			micbias_ctl |= BIT_MICBIAS_CTL_HSMICBIAS_EN_M;
++			mic_en1 |= BIT_ANAMICL_HSMIC_EN_M
++					| BIT_ANAMICL_MICAMPL_EN_M;
++			adc |= BIT_AVADC_CTL_ADCL_EN_M;
++			opt_ip |= BIT_OPTION_ATXL1_EN_M;
++		}
++	}
++	/* Main Mic */
++	if ((twl4030_local.current_input & INPUT_MAIN_MIC) ==
++			INPUT_MAIN_MIC) {
++		if (twl4030_local.main_mic_en) {
++			micbias_ctl |= BIT_MICBIAS_CTL_MICBIAS1_EN_M;
++			mic_en1 |= BIT_ANAMICL_MAINMIC_EN_M
++					 | BIT_ANAMICL_MICAMPL_EN_M;
++			adc |= BIT_AVADC_CTL_ADCL_EN_M;
++			opt_ip |= BIT_OPTION_ATXL1_EN_M;
++		}
++	}
++	/* Sub Mic */
++	if ((twl4030_local.current_input & INPUT_SUB_MIC) ==
++			INPUT_SUB_MIC) {
++		if (twl4030_local.sub_mic_en) {
++			micbias_ctl |= BIT_MICBIAS_CTL_MICBIAS2_EN_M;
++			mic_en2 |= BIT_ANAMICR_SUBMIC_EN_M
++					 | BIT_ANAMICR_MICAMPR_EN_M;
++			adc |= BIT_AVADC_CTL_ADCR_EN_M;
++			opt_ip |= BIT_OPTION_ATXR1_EN_M;
++		}
++	}
++	/* Aux */
++	if ((twl4030_local.current_input & INPUT_AUX) ==
++			INPUT_AUX) {
++		mic_en1 |= BIT_ANAMICL_AUXL_EN_M | BIT_ANAMICL_MICAMPL_EN_M;
++		mic_en2 |= BIT_ANAMICR_AUXR_EN_M | BIT_ANAMICR_MICAMPR_EN_M;
++		adc |= BIT_AVADC_CTL_ADCL_EN_M | BIT_AVADC_CTL_ADCR_EN_M;
++		opt_ip |= BIT_OPTION_ATXL1_EN_M | BIT_OPTION_ATXR1_EN_M;
++	}
++	/* Carkit */
++	if ((twl4030_local.current_input & INPUT_CARKIT) ==
++			INPUT_CARKIT) {
++		mic_en1 |= BIT_ANAMICL_CKMIC_EN_M | BIT_ANAMICL_MICAMPL_EN_M;
++		adc |= BIT_AVADC_CTL_ADCL_EN_M;
++		opt_ip |= BIT_OPTION_ATXL1_EN_M;
++	}
++	ret = audio_twl4030_write(REG_OPTION, opt_ip);
++	if (ret) {
++		line = __LINE__;
++		goto enable_ip_exit;
++	}
++	ret = audio_twl4030_write(REG_MICBIAS_CTL, micbias_ctl);
++	if (ret) {
++		line = __LINE__;
++		goto enable_ip_exit;
++	}
++	ret = audio_twl4030_write(REG_ANAMICL, mic_en1);
++	if (ret) {
++		line = __LINE__;
++		goto enable_ip_exit;
++	}
++	ret = audio_twl4030_write(REG_ANAMICR, mic_en2);
++	if (ret) {
++		line = __LINE__;
++		goto enable_ip_exit;
++	}
++	ret = audio_twl4030_write(REG_AVADC_CTL, adc);
++	if (ret) {
++		line = __LINE__;
++		goto enable_ip_exit;
++	}
++	/* Use ADC TX2 routed to digi mic - we dont use tx2 path
++	 * - route it to digi mic1
++	 */
++	ret = audio_twl4030_write(REG_ADCMICSEL, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto enable_ip_exit;
++	}
++	ret = audio_twl4030_write(REG_DIGMIXING, 0x0);	/* No Karaoke */
++enable_ip_exit:
++	if (ret)
++		printk(KERN_ERR "Error In Enable input[%d] in Line %d\n",
++			ret, line);
++	return ret;
++}
++
++/*
++ * Reset all the inputs
++ *  * NOTE * This should be called with codec power down
++ */
++static int twl4030_disable_input(void)
++{
++	int ret = 0;
++	int line = 0;
++
++	/* Disable all devices */
++	ret = audio_twl4030_write(REG_MICBIAS_CTL, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto disable_ip_exit;
++	}
++	ret = audio_twl4030_write(REG_ANAMICL, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto disable_ip_exit;
++	}
++	ret = audio_twl4030_write(REG_ANAMICR, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto disable_ip_exit;
++	}
++	ret = audio_twl4030_write(REG_AVADC_CTL, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto disable_ip_exit;
++	}
++	ret = audio_twl4030_write(REG_ADCMICSEL, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto disable_ip_exit;
++	}
++	ret = audio_twl4030_write(REG_DIGMIXING, 0x0);
++disable_ip_exit:
++	if (ret)
++		printk(KERN_ERR "Error in disable of input [%d] in Line %d\n",
++		       ret, line);
++	return ret;
++}
++
++/*
++ * Set up proper source. Call me with the codec powered down
++ */
++int twl4030_select_source(int flag, int val)
++{
++	int ret = 0;
++	int temp = 0;
++
++	switch (flag) {
++	case DIR_OUT:
++		/*
++		 * If more than one play device selected,
++		 * disable the device that is currently in use.
++		 */
++		if (hweight32(val) > 1)
++			val &= ~twl4030_local.outsrc;
++		/* Can select multiple output */
++		if ((val & SOUND_MASK_LINE1) == SOUND_MASK_LINE1)
++			temp |= OUTPUT_STEREO_HEADSET;
++		if ((val & SOUND_MASK_SPEAKER) == SOUND_MASK_SPEAKER)
++			temp |= OUTPUT_HANDS_FREE_CLASSD;
++		if ((val & SOUND_MASK_PHONEOUT) == SOUND_MASK_PHONEOUT)
++			temp |= OUTPUT_MONO_EARPIECE;
++		if ((val & SOUND_MASK_CD) == SOUND_MASK_CD)
++			temp |= OUTPUT_CARKIT;
++		twl4030_local.current_output = temp;
++		/* Toggle the source */
++		ret = twl4030_disable_output();
++		if (!ret)
++			ret = twl4030_enable_output();
++		if (!ret)
++			twl4030_local.outsrc = val;
++		break;
++	case DIR_IN:
++		/* If more than one device requested, reject the request */
++		if (hweight32(val) > 1)
++			return -EINVAL;
++		/* Select multiple inputs */
++		if ((val & SOUND_MASK_LINE) == SOUND_MASK_LINE)
++			temp |= INPUT_HEADSET_MIC;
++		if ((val & SOUND_MASK_MIC) == SOUND_MASK_MIC)
++			temp |= INPUT_MAIN_MIC | INPUT_SUB_MIC;
++		if ((val & SOUND_MASK_RADIO) == SOUND_MASK_RADIO)
++			temp |= INPUT_AUX;
++		if ((val & SOUND_MASK_CD) == SOUND_MASK_CD)
++			temp |= INPUT_CARKIT;
++		twl4030_local.current_input = temp;
++		/* Toggle the source */
++		ret = twl4030_disable_input();
++		if (!ret)
++			ret = twl4030_enable_input();
++		if (!ret)
++			twl4030_local.recsrc = val;
++		break;
++	default:
++		printk(KERN_WARNING PLATFORM_NAME "-" CODEC_NAME
++		       ": Wrong twl4030_selectsource flag specified\n");
++		ret = -EPERM;
++		break;
++
++	}
++	if (!ret)
++		twl4030_local.mod_cnt++;
++	else
++		printk(KERN_ERR "Error selsrc Flag=%d,err=%d\n", flag, ret);
++
++	return ret;
++}
++
++/*
++ * Set the gain of the requested device
++ */
++int twl4030_setvolume(int flag, u8 gain_l, u8 gain_r)
++{
++	int ret = 0;
++
++	if ((gain_l > AUDIO_MAX_OUTPUT_VOLUME)
++	    || (gain_r > AUDIO_MAX_OUTPUT_VOLUME)) {
++		printk(KERN_ERR "Invalid gain value %d %d\n", gain_l, gain_r);
++		return -EPERM;
++	}
++	switch (flag) {
++	case OUTPUT_VOLUME:
++		{
++			/* Normal volume control */
++			u8 fine_val_l =
++			    (unsigned char)((gain_l * COMPUTE_PRECISION) /
++					    AUDIO_OUTPUT_INCREMENT);
++			u8 fine_val_r =
++			    (unsigned char)((gain_r * COMPUTE_PRECISION) /
++					    AUDIO_OUTPUT_INCREMENT);
++			/* Inverted power control big value is small volume */
++			u8 ana_val_r =
++			    (unsigned char)(((AUDIO_MAX_OUTPUT_VOLUME -
++			     gain_r) * COMPUTE_PRECISION) / ARX_APGA_INCR);
++			u8 ana_val_l =
++			    (unsigned char)(((AUDIO_MAX_OUTPUT_VOLUME -
++			     gain_l) * COMPUTE_PRECISION) / ARX_APGA_INCR);
++			/* Default value at this time... make it ioctl ?? */
++			u8 coarse_val = AUDIO_DEF_COARSE_VOLUME_LEVEL;
++
++			/* I2S - SDRL2 and SDRR2 */
++			/* Digital boost */
++			ret = audio_twl4030_write(REG_ARXL2PGA,
++					coarse_val <<
++					BIT_ARXL2PGA_ARXL2PGA_CGAIN |
++					fine_val_l <<
++					BIT_ARXL2PGA_ARXL2PGA_FGAIN);
++			if (!ret)
++				ret = audio_twl4030_write(REG_ARXR2PGA,
++					coarse_val <<
++					BIT_ARXL2PGA_ARXL2PGA_CGAIN
++					| fine_val_r <<
++					BIT_ARXR2PGA_ARXR2PGA_FGAIN);
++			/* Analog boost */
++			if (!ret)
++				ret = audio_twl4030_write(REG_ARXL2_APGA_CTL,
++					BIT_ARXL2_APGA_CTL_ARXL2_PDZ_M
++					| BIT_ARXL2_APGA_CTL_ARXL2_DA_EN_M
++					| ana_val_l <<
++					BIT_ARXL2_APGA_CTL_ARXL2_GAIN_SET);
++			if (!ret)
++				ret = audio_twl4030_write(REG_ARXR2_APGA_CTL,
++					BIT_ARXR2_APGA_CTL_ARXR2_PDZ_M
++					| BIT_ARXR2_APGA_CTL_ARXR2_DA_EN_M
++					| ana_val_r <<
++					BIT_ARXR2_APGA_CTL_ARXR2_GAIN_SET);
++			if (!ret)
++				twl4030_local.play_volume =
++					    WRITE_LEFT_VOLUME(gain_l) |
++					    WRITE_RIGHT_VOLUME(gain_r);
++		}
++		break;
++	case OUTPUT_STEREO_HEADSET:
++		/* Only if current output device is stereo headset */
++		if ((twl4030_local.current_output & OUTPUT_STEREO_HEADSET) ==
++				OUTPUT_STEREO_HEADSET) {
++			/* Normal volume control */
++			u8 fine_val_l =
++			    (unsigned char)((gain_l * COMPUTE_PRECISION) /
++					    NON_LIN_INCREMENT);
++			u8 fine_val_r =
++			    (unsigned char)((gain_r * COMPUTE_PRECISION) /
++					    NON_LIN_INCREMENT);
++			u8 value_set[NON_LIN_GAIN_MAX] = NON_LIN_VALS;
++			/* Handle Mute request */
++			fine_val_l = (gain_l == 0) ? 0 : value_set[fine_val_l];
++			fine_val_r = (gain_r == 0) ? 0 : value_set[fine_val_r];
++			ret = audio_twl4030_write(REG_HS_GAIN_SET,
++					  (fine_val_l <<
++					   BIT_HS_GAIN_SET_HSL_GAIN) |
++					  (fine_val_r <<
++					   BIT_HS_GAIN_SET_HSR_GAIN));
++			if (!ret)
++				twl4030_local.hset =
++				    WRITE_LEFT_VOLUME(gain_l) |
++				    WRITE_RIGHT_VOLUME(gain_r);
++		}
++		break;
++	case OUTPUT_HANDS_FREE_CLASSD:
++		if ((twl4030_local.current_output & OUTPUT_HANDS_FREE_CLASSD) ==
++				OUTPUT_HANDS_FREE_CLASSD) {
++			/* NOTE: CLASSD no special gain */
++			twl4030_local.classd =
++			    WRITE_LEFT_VOLUME(gain_l) |
++			    WRITE_RIGHT_VOLUME(gain_r);
++		}
++		break;
++	case OUTPUT_MONO_EARPIECE:
++		if ((twl4030_local.current_output & OUTPUT_MONO_EARPIECE) ==
++				OUTPUT_MONO_EARPIECE) {
++			/* Normal volume control */
++			u8 curr_val;
++			u8 fine_val_l =
++			    (unsigned char)((gain_l * COMPUTE_PRECISION) /
++					    NON_LIN_INCREMENT);
++			u8 value_set[NON_LIN_GAIN_MAX] = NON_LIN_VALS;
++			fine_val_l = (gain_l == 0) ? 0 : value_set[fine_val_l];
++			/*EAR_CTL */
++			curr_val = audio_twl4030_read(REG_EAR_CTL);
++			curr_val &= ~BIT_EAR_CTL_EAR_GAIN_M;
++			ret = audio_twl4030_write(REG_EAR_CTL, curr_val |
++					  (fine_val_l <<
++					  BIT_EAR_CTL_EAR_GAIN));
++			if (!ret)
++				twl4030_local.ear = WRITE_LEFT_VOLUME(gain_l);
++		}
++		break;
++	case OUTPUT_SIDETONE:
++		/* Sidetone Gain Control */
++		if (twl4030_local.current_output) {
++			ret = audio_twl4030_write(REG_VSTPGA, gain_l);
++			if (!ret)
++				twl4030_local.sidetone =
++						WRITE_LEFT_VOLUME(gain_l);
++		}
++		break;
++	case OUTPUT_CARKIT:
++		if ((twl4030_local.current_output & OUTPUT_CARKIT) ==
++				OUTPUT_CARKIT) {
++			u8 curr_val;
++			u8 fine_val_l =
++			    (unsigned char)((gain_l * COMPUTE_PRECISION) /
++					    NON_LIN_INCREMENT);
++			u8 fine_val_r =
++			    (unsigned char)((gain_r * COMPUTE_PRECISION) /
++					    NON_LIN_INCREMENT);
++			u8 value_set[NON_LIN_GAIN_MAX] = NON_LIN_VALS;
++			fine_val_l = (gain_l == 0) ? 0 : value_set[fine_val_l];
++			fine_val_r = (gain_r == 0) ? 0 : value_set[fine_val_r];
++			/* Left gain */
++			curr_val = audio_twl4030_read(REG_PRECKL_CTL);
++			curr_val &= ~BIT_PRECKL_CTL_PRECKL_GAIN_M;
++			ret = audio_twl4030_write(REG_PRECKL_CTL, curr_val |
++					  (fine_val_l <<
++					  BIT_PRECKL_CTL_PRECKL_GAIN));
++			if (!ret)
++				twl4030_local.carkit_out =
++						WRITE_LEFT_VOLUME(gain_l);
++			/* Right gain */
++			curr_val = audio_twl4030_read(REG_PRECKR_CTL);
++			curr_val &= ~BIT_PRECKR_CTL_PRECKR_GAIN_M;
++			ret = audio_twl4030_write(REG_PRECKR_CTL, curr_val |
++					  (fine_val_r <<
++					  BIT_PRECKR_CTL_PRECKR_GAIN));
++			if (!ret)
++				twl4030_local.carkit_out =
++						WRITE_RIGHT_VOLUME(gain_r);
++		}
++		break;
++	case INPUT_VOLUME:
++		/* Set input volume */
++		{
++			u8 set_val_l = (unsigned char)
++					((gain_l * COMPUTE_PRECISION) /
++					AUDIO_INPUT_INCREMENT);
++			u8 set_val_r = (unsigned char)
++					((gain_r * COMPUTE_PRECISION) /
++					AUDIO_INPUT_INCREMENT);
++			/* NOTE: ANAMIC gain settings is handled by a
++			* default value
++			*/
++			/* I2S - TXL1 and TXR1 only */
++			ret = audio_twl4030_write(REG_ATXL1PGA,
++					set_val_l <<
++					BIT_ATXL1PGA_ATXL1PGA_GAIN);
++			if (!ret)
++				ret = audio_twl4030_write(REG_ATXR1PGA,
++					set_val_r <<
++					BIT_ATXR1PGA_ATXR1PGA_GAIN);
++			if (!ret)
++				twl4030_local.rec_volume =
++					    WRITE_LEFT_VOLUME(gain_l) |
++					    WRITE_RIGHT_VOLUME(gain_r);
++		}
++		break;
++	case INPUT_HEADSET_MIC:
++		if ((twl4030_local.current_input & INPUT_HEADSET_MIC) ==
++				INPUT_HEADSET_MIC) {
++			u8 set_val_l =
++			    (unsigned char)((gain_l * COMPUTE_PRECISION) /
++					    MIC_AMP_INCR);
++			/* ANAMIC_GAIN */
++			ret =
++			    audio_twl4030_write(REG_ANAMIC_GAIN,
++					set_val_l <<
++					BIT_ANAMIC_GAIN_MICAMPL_GAIN);
++			if (!ret)
++				twl4030_local.line =
++				    WRITE_LEFT_VOLUME(gain_l) |
++				    WRITE_RIGHT_VOLUME(gain_l);
++		}
++		break;
++	case INPUT_MAIN_MIC:
++		/* We do not use ALC Use ANAMIC_GAIN */
++		/* left volume for main mic */
++		if ((twl4030_local.current_input & INPUT_MAIN_MIC) ==
++				INPUT_MAIN_MIC) {
++			u8 set_val_l =
++			    (unsigned char)((gain_l * COMPUTE_PRECISION) /
++					    MIC_AMP_INCR);
++			int read_val = audio_twl4030_read(REG_ANAMIC_GAIN);
++			if (read_val >= 0) {
++				/* Clear the left vol entry */
++				read_val &= ~(BIT_ANAMIC_GAIN_MICAMPL_GAIN_M);
++				read_val |=
++				    set_val_l << BIT_ANAMIC_GAIN_MICAMPL_GAIN;
++				ret =
++				    audio_twl4030_write(REG_ANAMIC_GAIN,
++							(u8) read_val);
++				if (!ret)
++					twl4030_local.mic =
++					    WRITE_LEFT_VOLUME(gain_l) |
++					    WRITE_RIGHT_VOLUME(twl4030_local.
++								mic);
++			}
++		}
++		break;
++	case INPUT_SUB_MIC:
++		/* We do not use ALC */
++		/* right volume for submic */
++		if ((twl4030_local.current_input & INPUT_SUB_MIC) ==
++				INPUT_SUB_MIC) {
++			u8 set_val_r =
++			    (unsigned char)((gain_r * COMPUTE_PRECISION) /
++					    MIC_AMP_INCR);
++			int read_val = audio_twl4030_read(REG_ANAMIC_GAIN);
++			if (read_val >= 0) {
++				/* Clear the right vol entry */
++				read_val &= ~(BIT_ANAMIC_GAIN_MICAMPR_GAIN_M);
++				read_val |=
++				    set_val_r << BIT_ANAMIC_GAIN_MICAMPR_GAIN;
++				ret =
++				    audio_twl4030_write(REG_ANAMIC_GAIN,
++							(u8) read_val);
++				if (!ret)
++					twl4030_local.mic =
++					    WRITE_LEFT_VOLUME(twl4030_local.mic)
++					    | WRITE_RIGHT_VOLUME(gain_r);
++			}
++		}
++		break;
++	case INPUT_AUX:
++		if ((twl4030_local.current_input & INPUT_AUX) ==
++				INPUT_AUX) {
++			u8 set_val_l =
++			    (unsigned char)((gain_l * COMPUTE_PRECISION) /
++					    MIC_AMP_INCR);
++			u8 set_val_r =
++			    (unsigned char)((gain_r * COMPUTE_PRECISION) /
++					    MIC_AMP_INCR);
++			/* ANAMIC_GAIN */
++			ret =
++			    audio_twl4030_write(REG_ANAMIC_GAIN,
++					(set_val_l <<
++					BIT_ANAMIC_GAIN_MICAMPL_GAIN)
++					| (set_val_r <<
++					BIT_ANAMIC_GAIN_MICAMPR_GAIN));
++			if (!ret)
++				twl4030_local.aux =
++				    WRITE_LEFT_VOLUME(gain_l) |
++				    WRITE_RIGHT_VOLUME(gain_r);
++		}
++		break;
++	case INPUT_CARKIT:
++		if ((twl4030_local.current_input & INPUT_CARKIT) ==
++				INPUT_CARKIT) {
++			u8 set_val_l =
++			    (unsigned char)((gain_l * COMPUTE_PRECISION) /
++					    MIC_AMP_INCR);
++			/* ANAMIC_GAIN */
++			ret =
++			    audio_twl4030_write(REG_ANAMIC_GAIN,
++					set_val_l <<
++					BIT_ANAMIC_GAIN_MICAMPL_GAIN);
++			if (!ret)
++				twl4030_local.carkit_in =
++				    WRITE_LEFT_VOLUME(gain_l) |
++				    WRITE_RIGHT_VOLUME(gain_l);
++		}
++		break;
++	default:
++		printk(KERN_WARNING PLATFORM_NAME "-" CODEC_NAME
++		       ": Wrong twl4030_setvolume flag specified\n");
++		ret = -EPERM;
++		break;
++	}
++	if (!ret)
++		twl4030_local.mod_cnt++;
++
++	return ret;
++}
++
++/*
++ * Configure the codec's data path
++ */
++static int twl4030_codec_conf_data_path(void)
++{
++	u8 codec_data_width = 0;
++	u8 codec_mode = 0;
++
++	/* Check sample width */
++	if (twl4030_local.current_bitspersample ==
++				AUDIO_SAMPLE_DATA_WIDTH_16) {
++		/* Data width 16-bits */
++		codec_data_width = AUDIO_DATA_WIDTH_16SAMPLE_16DATA;
++	} else if (twl4030_local.current_bitspersample ==
++				AUDIO_SAMPLE_DATA_WIDTH_24) {
++		/* Data width 24-bits */
++		codec_data_width = AUDIO_DATA_WIDTH_32SAMPLE_24DATA;
++	} else {
++		printk(KERN_ERR "Unknown sample width %d\n",
++			twl4030_local.current_bitspersample);
++		return -EPERM;
++	}
++
++	/* No need to set BIT_AUDIO_IF_CLK256FS_EN_M -not using it as CLKS!! */
++	/* configure the audio IF of codec- Application Mode */
++	codec_mode =
++#ifndef TWL_MASTER
++	    BIT_AUDIO_IF_AIF_SLAVE_EN_M |
++#endif
++	    (codec_data_width << BIT_AUDIO_IF_DATA_WIDTH) |
++	    (AUDIO_DATA_FORMAT_I2S << BIT_AUDIO_IF_AIF_FORMAT) |
++	    BIT_AUDIO_IF_AIF_EN_M;
++
++	return audio_twl4030_write(REG_AUDIO_IF, codec_mode);
++}
++
++/*
++ * Set the sample rate of the codec and communication media (mcbsp)
++ *  * NOTE * Shut down the codec to change sample rate
++ *           Cannot reprogram the Codec APLL while codec is powered
++ */
++int twl4030_set_samplerate(long sample_rate)
++{
++	int ret = 0;
++	int count = 0;
++	u8 codec_mode = 0;
++
++	/* Validate if rate is proper */
++	for (; count < NUMBER_OF_RATES_SUPPORTED; count++)
++		if (valid_sample_rates[count].rate == sample_rate)
++			break;
++
++	if (count >= NUMBER_OF_RATES_SUPPORTED) {
++		printk(KERN_ERR "[%d] Unsupported sample rate!!\n",
++		       (u32) sample_rate);
++		return -EPERM;
++	}
++
++	ret =
++	    audio_twl4030_write(REG_APLL_CTL,
++				AUDIO_APLL_DEFAULT << BIT_APLL_CTL_APLL_INFREQ);
++	if (ret < 0) {
++		printk(KERN_ERR "unable to set the INFREQ %d\n", ret);
++		return ret;
++	}
++	/* Configure the codec -rate */
++	ret = audio_twl4030_read(REG_CODEC_MODE);
++	if (ret < 0) {
++		printk(KERN_ERR "unable to read codec_mode %d\n", ret);
++		return ret;
++	}
++	codec_mode = (u8) ret;
++
++	/* Clear unnecessary bits */
++	codec_mode &= ~(BIT_CODEC_MODE_APLL_RATE_M);
++
++	codec_mode |=
++	    (valid_sample_rates[count].apll << BIT_CODEC_MODE_APLL_RATE);
++	ret = audio_twl4030_write(REG_CODEC_MODE, codec_mode);
++
++	/* Program the apll */
++	if (!ret)
++		ret = audio_twl4030_write(REG_APLL_CTL,
++					AUDIO_APLL_DEFAULT <<
++					BIT_APLL_CTL_APLL_INFREQ |
++					BIT_APLL_CTL_APLL_EN_M);
++
++	/* Change the sample rate if we are successful */
++	if (!ret)
++		twl4030_local.audio_samplerate = sample_rate;
++
++	return ret;
++}
++
++/*
++ * twl4030_unconfigure
++ */
++void twl4030_unconfigure(void)
++{
++	if (twl4030_configured == 1) {
++		twl4030_codec_off();
++		twl4030_disable_output();
++		twl4030_disable_input();
++		twl4030_ext_mut_unconf();
++	}
++	if (twl4030_configured > 0)
++		twl4030_configured--;
++}
++
++/*
++ * Clean up the register settings
++ */
++static int twl4030_cleanup(void)
++{
++	int ret = 0;
++	int line = 0;
++	ret = audio_twl4030_write(REG_VRXPGA, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_VDL_APGA_CTL, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_BTPGA, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_DTMF_FREQSEL, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_DTMF_TONOFF, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_DTMF_PGA_CTL2, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_DTMF_PGA_CTL1, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_DTMF_WANONOFF, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_HS_POPN_SET, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	/* Shut down the voice and other paths completely */
++	ret = audio_twl4030_write(REG_ARXR1PGA, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_ARXL1PGA, 0x0);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_ARXL1_APGA_CTL, 0x00);	/* Path1 */
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_ARXR1_APGA_CTL, 0x00);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_ARXL2_APGA_CTL, 0x00);	/* Path1 */
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_ARXR2_APGA_CTL, 0x00);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_ALC_CTL, 0x00);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_ARXL1PGA, 0x00);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_ARXR1PGA, 0x00);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_ARXL2PGA, 0x00);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_ARXR2PGA, 0x00);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_ATXL1PGA, 0x00);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_ATXR1PGA, 0x00);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_AVTXL2PGA, 0x00);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_AVTXR2PGA, 0x00);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_AVDAC_CTL, 0x00);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++	ret = audio_twl4030_write(REG_OPTION, 0);
++	if (ret) {
++		line = __LINE__;
++		goto cleanup_exit;
++	}
++cleanup_exit:
++	if (ret)
++		printk(KERN_ERR "Cleanup Error[%d] Error in line %d\n",
++		       ret, line);
++	return ret;
++}
++
++/*
++ * twl4030_configure
++ *  * NOTE * Should be called with codec off
++ */
++int twl4030_configure(void)
++{
++	int ret = 0;
++	int line = 0;
++
++	if (twl4030_configured == 0) {
++		int data = 0;
++		ret = twl4030_ext_mut_conf();
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		ret = twl4030_ext_mut_on();
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++
++		ret = twl4030_cleanup();
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++
++		/* Set up the codec_mode - use option 1
++		 * - assume no voice path
++		 */
++		data = audio_twl4030_read(REG_CODEC_MODE);
++		if (data < 0) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		ret = audio_twl4030_write(REG_CODEC_MODE,
++					  ((u8)data) | CODEC_OPTION_1 <<
++					  BIT_CODEC_MODE_OPT_MODE);
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		ret = twl4030_codec_conf_data_path();
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		/* Select Rx path
++		 * SDRL1->RxL1
++		 * SDRR1->RxR1
++		 * SDRL2->RxL2 (mono SDRM2)
++		 * SDRL2->RxL2 (mono SDRM2)
++		 */
++		ret =
++		    audio_twl4030_write(REG_RX_PATH_SEL,
++					((twl4030_local.current_stereomode ==
++					  STEREO_MODE) ? 0x00 :
++					 BIT_RX_PATH_SEL_RXL2_SEL_M |
++					 BIT_RX_PATH_SEL_RXR2_SEL_M));
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		/* Set the gains - we do not know the defaults
++		 * attempt to set the volume of all the devices
++		 * only those enabled get set.
++		 */
++		ret = twl4030_setvolume(OUTPUT_VOLUME,
++					READ_LEFT_VOLUME
++					(twl4030_local.play_volume),
++					READ_RIGHT_VOLUME
++					(twl4030_local.play_volume));
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		ret = twl4030_setvolume(OUTPUT_STEREO_HEADSET,
++					READ_LEFT_VOLUME(twl4030_local.hset),
++					READ_RIGHT_VOLUME(twl4030_local.hset));
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		ret = twl4030_setvolume(OUTPUT_HANDS_FREE_CLASSD,
++				      READ_LEFT_VOLUME(twl4030_local.classd),
++				      READ_RIGHT_VOLUME(twl4030_local.classd));
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		ret = twl4030_setvolume(OUTPUT_MONO_EARPIECE,
++					READ_LEFT_VOLUME(twl4030_local.ear), 0);
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		ret = twl4030_setvolume(OUTPUT_SIDETONE,
++					READ_LEFT_VOLUME
++					(twl4030_local.sidetone), 0);
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		ret = twl4030_setvolume(OUTPUT_CARKIT,
++					READ_LEFT_VOLUME
++					(twl4030_local.carkit_out),
++					READ_RIGHT_VOLUME
++				      (twl4030_local.carkit_out));
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		ret = twl4030_setvolume(INPUT_VOLUME,
++					READ_LEFT_VOLUME
++					(twl4030_local.rec_volume),
++					READ_RIGHT_VOLUME
++					(twl4030_local.rec_volume));
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		ret = twl4030_setvolume(INPUT_HEADSET_MIC,
++					READ_LEFT_VOLUME(twl4030_local.line),
++					READ_RIGHT_VOLUME(twl4030_local.line));
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		ret = twl4030_setvolume(INPUT_MAIN_MIC,
++					READ_LEFT_VOLUME(twl4030_local.mic), 0);
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		ret = twl4030_setvolume(INPUT_SUB_MIC, 0,
++					READ_RIGHT_VOLUME(twl4030_local.mic));
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		ret = twl4030_setvolume(INPUT_AUX,
++					READ_LEFT_VOLUME(twl4030_local.aux),
++					READ_RIGHT_VOLUME(twl4030_local.aux));
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		ret = twl4030_setvolume(INPUT_CARKIT,
++					READ_LEFT_VOLUME
++					(twl4030_local.carkit_in),
++					0);
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		/* Do not bypass the high pass filters */
++		ret = audio_twl4030_write(REG_MISC_SET_2, 0x0);
++		if (ret) {
++			line = __LINE__;
++			goto configure_exit;
++		}
++		/* Switch on the input required */
++		if (!(twl4030_disable_output())) {
++			ret = twl4030_enable_output();
++			if (ret) {
++				line = __LINE__;
++				goto configure_exit;
++			}
++		}
++		if (!(twl4030_disable_input())) {
++			ret = twl4030_enable_input();
++			if (ret) {
++				line = __LINE__;
++				goto configure_exit;
++			}
++		}
++	}
++	twl4030_configured++;
++configure_exit:
++	if (ret)
++		printk(KERN_ERR "Configuration Error[%d] Error in line %d\n",
++				ret, line);
++	return ret;
++}
++
++/*
++ * McBSP callback
++ */
++void twl4030_mcbsp_dma_cb(u32 ch_status, void *arg)
++{
++	if (ch_status) {
++		printk(KERN_ERR "Error happend[%d 0x%x]!!\n", ch_status,
++		       ch_status);
++		return;
++
++	}
++	callback_omap_alsa_sound_dma(arg);
++}
++
++/*******************************************************************************
++ *
++ * Codec APIs
++ *
++ ******************************************************************************/
++
++static int twl4030_default_samplerate(void)
++{
++	return AUDIO_RATE_DEFAULT;
++}
++
++/*
++ * omap_twl4030_initialize
++ */
++static int omap_twl4030_initialize(void)
++{
++	int ret = 0;
++
++	mcbsp_interface_acquired++;
++	if (mcbsp_interface_acquired != 1) {
++		ret = 0;
++		goto initialize_exit_path1;
++	}
++
++	omap_mcbsp_set_io_type(AUDIO_MCBSP, 0);
++	ret = omap_mcbsp_request(AUDIO_MCBSP);
++	if (unlikely(ret)) {
++		printk(KERN_ERR " Request for MCBSP Failed[%d]\n", ret);
++		goto initialize_exit_path1;
++	}
++
++#ifdef TWL_DUMP_REGISTERS
++	printk(KERN_INFO "pre\n");
++	twl4030_dump_registers();
++#endif
++
++	ret = twl4030_ext_mut_conf();
++	if (ret) {
++		printk(KERN_ERR "a twl4030_ext_mut_conf failed [%d]\n", ret);
++		goto initialize_exit_path2;
++	}
++	ret = twl4030_ext_mut_on();
++	if (ret) {
++		printk(KERN_ERR "a twl4030_ext_mut_on failed [%d]\n", ret);
++		goto initialize_exit_path2;
++	}
++	/* Toggle the codec power mode */
++	ret = twl4030_codec_tog_on();
++	if (unlikely(ret)) {
++		printk(KERN_ERR "a1 twl4030_codec_tog failed [%d]\n", ret);
++		goto initialize_exit_path2;
++	}
++	/* Sample rate configuration - set APLLs to setup regs */
++	ret = twl4030_set_samplerate(twl4030_local.audio_samplerate);
++	if (ret) {
++		printk(KERN_ERR "Sample rate setting failed [%d]\n", ret);
++		goto initialize_exit_path2;
++	}
++	ret = twl4030_configure();
++	if (unlikely(ret)) {
++		printk(KERN_ERR " twl4030_configure_device failed [%d]\n", ret);
++		goto initialize_exit_path2;
++	}
++	/* Switch off the codec so that when mcbsp starts.. we are waiting */
++	if (unlikely(twl4030_codec_off())) {
++		printk(KERN_ERR "a2 twl4030_codec_off failed [%d]\n", ret);
++		goto initialize_exit_path2;
++	}
++	ret = twl4030_conf_data_interface();
++	if (ret) {
++		printk(KERN_ERR "Codec Data init failed [%d]\n", ret);
++		goto initialize_exit_path2;
++	}
++	if (ret) {
++		printk(KERN_ERR "register of ISR failed [%d]\n", ret);
++		goto initialize_exit_path3;
++	}
++	ret = twl4030_codec_on();
++	if (unlikely(ret)) {
++		printk(KERN_ERR "a2 twl4030_codec_on failed [%d]\n", ret);
++		goto initialize_exit_path3;
++	}
++	ret = twl4030_ext_mut_off();
++	if (unlikely(ret)) {
++		printk(KERN_ERR "twl4030_ext_mut_off failed [%d]\n", ret);
++		goto initialize_exit_path3;
++	}
++	/* Codec is operational */
++#ifdef TWL_DUMP_REGISTERS
++	printk(KERN_INFO "post\n");
++	twl4030_dump_registers();
++#endif
++#ifdef TWL_DUMP_REGISTERS_MCBSP
++	printk(KERN_INFO "CONFIG");
++	omap_mcbsp_dump_reg(AUDIO_MCBSP);
++#endif
++
++#ifdef DEBUG
++#ifdef TONE_GEN
++	generate_tone();
++#endif
++#endif				/* DEBUG */
++	return 0;
++initialize_exit_path3:
++	twl4030_unconfigure();
++	(void)omap2_mcbsp_reset(AUDIO_MCBSP);
++initialize_exit_path2:
++	/* Don't care about result */
++	(void)omap_mcbsp_free(AUDIO_MCBSP);
++	twl4030_ext_mut_unconf();
++initialize_exit_path1:
++	return ret;
++}
++
++/*
++ * omap_twl4030_shutdown
++ */
++static int omap_twl4030_shutdown(void)
++{
++	mcbsp_interface_acquired--;
++
++	if (!mcbsp_interface_acquired) {
++		(void)omap2_mcbsp_reset(AUDIO_MCBSP);
++		omap_mcbsp_free(AUDIO_MCBSP);
++		twl4030_unconfigure();
++	}
++
++	return 0;
++}
++
++int twl4030_stereomode_set(int mode, int dsp)
++{
++	int ret = 0;
++	u8 dac_ctl = 0;
++
++	if (twl4030_local.current_stereomode == mode) {
++		/* Nothing to do at all */
++		return 0;
++	}
++	/* If the data streams are active. It is a very very bad idea to change
++	 * data transfer modes
++	 */
++
++	ret = twl4030_ext_mut_on();
++	if (unlikely(ret)) {
++		printk(KERN_ERR "twl4030_ext_mut_on failed [%d]\n", ret);
++		return ret;
++	}
++	/* Toggle power of codec */
++	ret = twl4030_codec_tog_on();
++	if (ret < 0) {
++		printk(KERN_ERR "MONO/STEREO Codec set failed\n");
++		goto set_stereo_mode_exit;
++	}
++	ret = audio_twl4030_read(REG_AVDAC_CTL);
++	if (ret < 0) {
++		printk(KERN_ERR "did not get dac ctrl reg\n");
++		goto set_stereo_mode_exit;
++	}
++	dac_ctl = ret;
++	twl4030_local.current_stereomode = mode;
++	if (twl4030_local.current_stereomode == MONO_MODE)
++		dac_ctl &= ~BIT_AVDAC_CTL_ADACR2_EN_M;
++	else
++		dac_ctl |= BIT_AVDAC_CTL_ADACR2_EN_M;
++	ret = audio_twl4030_write(REG_AVDAC_CTL, dac_ctl);
++	if (ret < 0) {
++		printk(KERN_ERR "did not set dac ctrl reg\n");
++		goto set_stereo_mode_exit;
++	}
++
++	/* Power off codec */
++	ret = twl4030_codec_off();
++	if (ret) {
++		printk(KERN_ERR "Unable to switch off the codec \n");
++		goto set_stereo_mode_exit;
++	}
++	if (dsp) {
++		ret = twl4030_conf_data_interface();
++		if (ret) {
++			printk(KERN_ERR "Configure data interface failed\n");
++			goto set_stereo_mode_exit;
++		}
++		ret = omap2_mcbsp_dma_recv_params(AUDIO_MCBSP,
++				&(twl4030_mcbsp_settings.
++				audio_mcbsp_rx_transfer_params));
++		if (ret < 0) {
++			printk(KERN_ERR "MONO/STEREO RX params failed");
++			goto set_stereo_mode_exit;
++		}
++		ret = omap2_mcbsp_dma_trans_params(AUDIO_MCBSP,
++				&(twl4030_mcbsp_settings.
++				audio_mcbsp_tx_transfer_params));
++		if (ret < 0) {
++			printk(KERN_ERR "MONO/STEREO TX params failed");
++			goto set_stereo_mode_exit;
++		}
++	}
++	/* Set the Mixing bit off if stereo, else set it to on */
++#ifdef MONO_MODE_SOUNDS_STEREO
++	ret =
++	    audio_twl4030_write(REG_RX_PATH_SEL,
++				((mode ==
++				  STEREO_MODE) ? 0x00 :
++				 BIT_RX_PATH_SEL_RXL2_SEL_M |
++				 BIT_RX_PATH_SEL_RXR2_SEL_M));
++#else
++	ret = audio_twl4030_write(REG_RX_PATH_SEL, 0x00);
++#endif
++	ret = (!twl4030_codec_on()) && (twl4030_ext_mut_off());
++	if (unlikely(ret))
++		printk(KERN_ERR "twl4030_ext_mut_off failed [%d]\n", ret);
++set_stereo_mode_exit:
++	if (ret)
++		printk(KERN_ERR "Setting Stereo mode failed[0x%x]\n", mode);
++	return ret;
++}
++
++/*
++ * Check if the device is in real present or not.
++ * If present then register the mixer device. else return failure
++ */
++int __devinit omap_twl4030_probe(struct platform_device *pdev)
++{
++	struct omap_alsa_codec_config *codec_cfg;
++	int ret = 0;
++
++	codec_cfg = pdev->dev.platform_data;
++	if (codec_cfg != NULL) {
++		codec_cfg->name = "TWL4030";
++		codec_cfg->hw_constraints_rates =
++					&twl4030_pcm_hw_constraint_list;
++		codec_cfg->snd_omap_alsa_playback =
++					&twl4030_pcm_hardware_playback;
++		codec_cfg->snd_omap_alsa_capture =
++					&twl4030_pcm_hardware_capture;
++		codec_cfg->codec_configure_dev = twl4030_configure;
++		codec_cfg->codec_set_samplerate = twl4030_set_samplerate;
++		codec_cfg->codec_set_stereomode = twl4030_stereomode_set;
++		codec_cfg->codec_clock_on = omap_twl4030_initialize;
++		codec_cfg->codec_clock_off = omap_twl4030_shutdown;
++		codec_cfg->get_default_samplerate = twl4030_default_samplerate;
++		codec_cfg->get_default_samplerate = twl4030_default_samplerate;
++		ret = snd_omap_alsa_post_probe(pdev, codec_cfg);
++	} else {
++		return -ENODEV;
++	}
++
++	/* Check if T2 device is actually present - Read IDCODE reg */
++	printk(KERN_INFO PLATFORM_NAME " " CODEC_NAME " Audio Support: ");
++	if (twl4030_i2c_read_u8(TWL4030_MODULE_INTBR, (u8 *)&ret, 0x00)) {
++		ret = -ENODEV;
++		printk(KERN_INFO "Chip Not detected\n");
++		goto twl4030_probe_out;
++	}
++	if (mixer_dev_id >= 0) {
++		/* Announcement Time */
++		printk(KERN_INFO "Chip Rev[0x%02x] Initialized\n", ret);
++		ret = 0;
++	} else {
++		printk(KERN_INFO "Mixer Not Initialized\n");
++		ret = mixer_dev_id;
++	}
++twl4030_probe_out:
++	return ret;
++}
++
++/*******************************************************************************
++ *
++ * Module APIs
++ *
++ ******************************************************************************/
++
++static void twl4030_audio_release(struct device *dev)
++{
++	/* Nothing to release */
++}
++
++static struct platform_driver omap_audio_driver = {
++	.probe = omap_twl4030_probe,
++	.remove = snd_omap_alsa_remove,
++#ifdef CONFIG_PM
++	.suspend = snd_omap_alsa_suspend,
++	.resume = snd_omap_alsa_resume,
++#endif
++	.driver = {
++		.name = OMAP_AUDIO_NAME
++	}
++};
++
++static struct platform_device omap_audio_device = {
++	.name = OMAP_AUDIO_NAME,
++	.id = 7,
++	.dev = {
++		.release = twl4030_audio_release,
++	},
++};
++
++/*
++ * twl4030_init
++ */
++static int __init twl4030_init(void)
++{
++
++	int err = 0;
++	struct omap_alsa_codec_config *codec_cfg;
++
++	/* Initialize TWL4030 configured counter */
++	twl4030_configured = 0;
++
++	/* Register the codec with the audio driver */
++	err = platform_driver_register(&omap_audio_driver);
++	if (err)
++		printk(KERN_ERR "Failed to register TWL driver"
++		       " with Audio ALSA Driver\n");
++
++	codec_cfg = kmalloc(sizeof(struct omap_alsa_codec_config), GFP_KERNEL);
++	if (!codec_cfg)
++		return -ENOMEM;
++	memset(codec_cfg, 0, sizeof(struct omap_alsa_codec_config));
++	omap_audio_device.dev.platform_data = codec_cfg;
++
++	err = platform_device_register(&omap_audio_device);
++	if (err) {
++		printk(KERN_ERR "OMAP Audio Device Register failed =%d\n", err);
++		kfree(codec_cfg);
++		codec_cfg = NULL;
++		return err;
++	}
++	return err;
++}
++
++/*
++ * twl4030_exit
++ *
++ */
++static void __exit twl4030_exit(void)
++{
++	platform_device_unregister(&omap_audio_device);
++	platform_driver_unregister(&omap_audio_driver);
++
++	return;
++}
++
++/*******************************************************************************
++ *
++ * Debug APIs
++ *
++ ******************************************************************************/
++
++/*******************************************************************************
++ * TONEGEN:
++ * This is a test to generate a rather unpleasant sound..
++ * verifies if the mcbsp is active
++ ******************************************************************************/
++#ifdef TONE_GEN
++/* Generates a shrill tone */
++u16 tone[] = {
++	0x0ce4, 0x0ce4, 0x1985, 0x1985, 0x25A1, 0x25A1, 0x30FD, 0x30FE,
++	0x3B56, 0x3B55, 0x447A, 0x447A, 0x4C3B, 0x4C3C, 0x526D, 0x526C,
++	0x56F1, 0x56F1, 0x59B1, 0x59B1, 0x5A9E, 0x5A9D, 0x59B1, 0x59B2,
++	0x56F3, 0x56F2, 0x526D, 0x526D, 0x4C3B, 0x4C3B, 0x447C, 0x447C,
++	0x3B5A, 0x3B59, 0x30FE, 0x30FE, 0x25A5, 0x25A6, 0x1989, 0x198A,
++	0x0CE5, 0x0CE3, 0x0000, 0x0000, 0xF31C, 0xF31C, 0xE677, 0xE676,
++	0xDA5B, 0xDA5B, 0xCF03, 0xCF03, 0xC4AA, 0xC4AA, 0xBB83, 0xBB83,
++	0xB3C5, 0xB3C5, 0xAD94, 0xAD94, 0xA90D, 0xA90E, 0xA64F, 0xA64E,
++	0xA562, 0xA563, 0xA64F, 0xA64F, 0xA910, 0xA90F, 0xAD93, 0xAD94,
++	0xB3C4, 0xB3C4, 0xBB87, 0xBB86, 0xC4AB, 0xC4AB, 0xCF03, 0xCF03,
++	0xDA5B, 0xDA5A, 0xE67B, 0xE67B, 0xF31B, 0xF3AC, 0x0000, 0x0000,
++	0x0CE4, 0x0CE4, 0x1985, 0x1985, 0x25A1, 0x25A1, 0x30FD, 0x30FE,
++	0x3B56, 0x3B55, 0x447A, 0x447A, 0x4C3B, 0x4C3C, 0x526D, 0x526C,
++	0x56F1, 0x56F1, 0x59B1, 0x59B1, 0x5A9E, 0x5A9D, 0x59B1, 0x59B2,
++	0x56F3, 0x56F2, 0x526D, 0x526D, 0x4C3B, 0x4C3B, 0x447C, 0x447C,
++	0x3B5A, 0x3B59, 0x30FE, 0x30FE, 0x25A5, 0x25A6, 0x1989, 0x198A,
++	0x0CE5, 0x0CE3, 0x0000, 0x0000, 0xF31C, 0xF31C, 0xE677, 0xE676,
++	0xDA5B, 0xDA5B, 0xCF03, 0xCF03, 0xC4AA, 0xC4AA, 0xBB83, 0xBB83,
++	0xB3C5, 0xB3C5, 0xAD94, 0xAD94, 0xA90D, 0xA90E, 0xA64F, 0xA64E,
++	0xA562, 0xA563, 0xA64F, 0xA64F, 0xA910, 0xA90F, 0xAD93, 0xAD94,
++	0xB3C4, 0xB3C4, 0xBB87, 0xBB86, 0xC4AB, 0xC4AB, 0xCF03, 0xCF03,
++	0xDA5B, 0xDA5A, 0xE67B, 0xE67B, 0xF31B, 0xF3AC, 0x0000, 0x0000,
++	0x0CE4, 0x0CE4, 0x1985, 0x1985, 0x25A1, 0x25A1, 0x30FD, 0x30FE,
++	0x3B56, 0x3B55, 0x447A, 0x447A, 0x4C3B, 0x4C3C, 0x526D, 0x526C,
++	0x56F1, 0x56F1, 0x59B1, 0x59B1, 0x5A9E, 0x5A9D, 0x59B1, 0x59B2,
++	0x56F3, 0x56F2, 0x526D, 0x526D, 0x4C3B, 0x4C3B, 0x447C, 0x447C,
++	0x3B5A, 0x3B59, 0x30FE, 0x30FE, 0x25A5, 0x25A6, 0x1989, 0x198A,
++	0x0CE5, 0x0CE3, 0x0000, 0x0000, 0xF31C, 0xF31C, 0xE677, 0xE676,
++	0xDA5B, 0xDA5B, 0xCF03, 0xCF03, 0xC4AA, 0xC4AA, 0xBB83, 0xBB83,
++	0xB3C5, 0xB3C5, 0xAD94, 0xAD94, 0xA90D, 0xA90E, 0xA64F, 0xA64E,
++	0xA562, 0xA563, 0xA64F, 0xA64F, 0xA910, 0xA90F, 0xAD93, 0xAD94,
++	0xB3C4, 0xB3C4, 0xBB87, 0xBB86, 0xC4AB, 0xC4AB, 0xCF03, 0xCF03,
++	0xDA5B, 0xDA5A, 0xE67B, 0xE67B, 0xF31B, 0xF3AC, 0x0000, 0x0000
++};
++
++void generate_tone(void)
++{
++	int count = 0;
++	int ret = 0;
++
++	printk(KERN_INFO "TONE GEN TEST:");
++
++	for (count = 0; count < 5000; count++) {
++		int bytes;
++		for (bytes = 0; bytes < sizeof(tone) / 2; bytes++) {
++			ret = omap_mcbsp_pollwrite(AUDIO_MCBSP, tone[bytes]);
++			if (ret == -1) {
++				/* Retry */
++				bytes--;
++			} else if (ret == -2) {
++				printk(KERN_INFO "ERROR:bytes=%d\n", bytes);
++				return;
++			}
++		}
++	}
++	printk(KERN_INFO "SUCCESS\n");
++}
++#endif	/* End of TONE_GEN */
++
++/*******************************************************************************
++ * TWL_DUMP_REGISTERS:
++ * This will dump the entire register set of Page 2 twl4030.
++ * Useful for major goof ups
++ ******************************************************************************/
++#ifdef TWL_DUMP_REGISTERS
++/*
++ * twl4030_dump registers
++ */
++void twl4030_dump_registers(void)
++{
++	int i = 0;
++	u16 data = 0;
++
++	printk(KERN_INFO "TWL 4030 Register dump for Audio Module\n");
++	for (i = REG_CODEC_MODE; i <= REG_MISC_SET_2; i++) {
++		data = audio_twl4030_read(i);
++		printk(KERN_INFO "Register[0x%02x]=0x%04x\n", i, data);
++
++	}
++}
++#endif	/* End of #ifdef TWL_DUMP_REGISTERS */
++
++module_init(twl4030_init);
++module_exit(twl4030_exit);
++
++MODULE_AUTHOR("Texas Instruments");
++MODULE_DESCRIPTION("Codec audio driver for the TI TWL4030 codec.");
++MODULE_LICENSE("GPL");
+diff --git a/sound/arm/omap/omap-alsa-twl4030.h b/sound/arm/omap/omap-alsa-twl4030.h
+new file mode 100644
+index 0000000..5f8f5bf
+--- /dev/null
++++ b/sound/arm/omap/omap-alsa-twl4030.h
+@@ -0,0 +1,976 @@
++/*
++ * sound/arm/omap/omap-alsa-twl4030.h
++ *
++ * The Audio Specific Definitions for TWL4030 ES1.0 chip
++ *
++ * Copyright (C) 2004-2007 Texas Instruments, Inc.
++ *
++ * This package is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * THIS PACKAGE IS PROVIDED ``AS IS'' AND WITHOUT ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED
++ * WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR A PARTICULAR PURPOSE.
++ *
++ * Contributors:
++ *	Nishanth Menon
++ *	Jian Zhang
++ * 	Leonides Martinez
++ *	Hari Nagalla
++ *	Misael Lopez Cruz
++ */
++#ifndef __OMAP_AUDIO_TWL4030_H__
++#define __OMAP_AUDIO_TWL4030_H__
++
++/****************************************
++ *  AUDIO_VOICE
++ ****************************************/
++
++/**** Register Definitions REG_BASE=0x0 DevAdd=0x49 */
++/*** CONVENTION:
++ * REG_xxx - Register offset
++ * BIT_xxx - Bit field bit location
++ * BIT_xxx_M - Mask for that Field.
++ * Valid values are posted next to the bit definition
++ */
++
++/* ====================================================================== */
++
++#define REG_CODEC_MODE                           (0x1)
++#define REG_OPTION                               (0x2)
++#define REG_MICBIAS_CTL                          (0x4)
++#define REG_ANAMICL                              (0x5)
++#define REG_ANAMICR                              (0x6)
++#define REG_AVADC_CTL                            (0x7)
++#define REG_ADCMICSEL                            (0x8)
++#define REG_DIGMIXING                            (0x9)
++#define REG_ATXL1PGA                             (0xA)
++#define REG_ATXR1PGA                             (0xB)
++#define REG_AVTXL2PGA                            (0xC)
++#define REG_AVTXR2PGA                            (0xD)
++#define REG_AUDIO_IF                             (0xE)
++#define REG_VOICE_IF                             (0xF)
++#define REG_ARXR1PGA                             (0x10)
++#define REG_ARXL1PGA                             (0x11)
++#define REG_ARXR2PGA                             (0x12)
++#define REG_ARXL2PGA                             (0x13)
++#define REG_VRXPGA                               (0x14)
++#define REG_VSTPGA                               (0x15)
++#define REG_VRX2ARXPGA                           (0x16)
++#define REG_AVDAC_CTL                            (0x17)
++#define REG_ARX2VTXPGA                           (0x18)
++#define REG_ARXL1_APGA_CTL                       (0x19)
++#define REG_ARXR1_APGA_CTL                       (0x1A)
++#define REG_ARXL2_APGA_CTL                       (0x1B)
++#define REG_ARXR2_APGA_CTL                       (0x1C)
++#define REG_ATX2ARXPGA                           (0x1D)
++#define REG_BT_IF                                (0x1E)
++#define REG_BTPGA                                (0x1F)
++#define REG_BTSTPGA                              (0x20)
++#define REG_EAR_CTL                              (0x21)
++#define REG_HS_SEL                               (0x22)
++#define REG_HS_GAIN_SET                          (0x23)
++#define REG_HS_POPN_SET                          (0x24)
++#define REG_PREDL_CTL                            (0x25)
++#define REG_PREDR_CTL                            (0x26)
++#define REG_PRECKL_CTL                           (0x27)
++#define REG_PRECKR_CTL                           (0x28)
++#define REG_HFL_CTL                              (0x29)
++#define REG_HFR_CTL                              (0x2A)
++#define REG_ALC_CTL                              (0x2B)
++#define REG_ALC_SET1                             (0x2C)
++#define REG_ALC_SET2                             (0x2D)
++#define REG_BOOST_CTL                            (0x2E)
++#define REG_SOFTVOL_CTL                          (0x2F)
++#define REG_DTMF_FREQSEL                         (0x30)
++#define REG_DTMF_TONEXT1H                        (0x31)
++#define REG_DTMF_TONEXT1L                        (0x32)
++#define REG_DTMF_TONEXT2H                        (0x33)
++#define REG_DTMF_TONEXT2L                        (0x34)
++#define REG_DTMF_TONOFF                          (0x35)
++#define REG_DTMF_WANONOFF                        (0x36)
++#define REG_I2S_RX_SCRAMBLE_H                    (0x37)
++#define REG_I2S_RX_SCRAMBLE_M                    (0x38)
++#define REG_I2S_RX_SCRAMBLE_L                    (0x39)
++#define REG_APLL_CTL                             (0x3A)
++#define REG_DTMF_CTL                             (0x3B)
++#define REG_DTMF_PGA_CTL2                        (0x3C)
++#define REG_DTMF_PGA_CTL1                        (0x3D)
++#define REG_MISC_SET_1                           (0x3E)
++#define REG_PCMBTMUX                             (0x3F)
++#define REG_RX_PATH_SEL                          (0x43)
++#define REG_VDL_APGA_CTL                         (0x44)
++#define REG_VIBRA_CTL                            (0x45)
++#define REG_VIBRA_SET                            (0x46)
++#define REG_VIBRA_PWM_SET                        (0x47)
++#define REG_ANAMIC_GAIN                          (0x48)
++#define REG_MISC_SET_2                           (0x49)
++
++#define MAX_NUM_REG_CLEAN                        (REG_MISC_SET_2 - \
++						  REG_CODEC_MODE)
++
++/* BitField Definitions */
++
++/* CODEC_MODE Fields */
++#define BIT_CODEC_MODE_OPT_MODE                  (0x000)
++#define BIT_CODEC_MODE_OPT_MODE_M                (0x00000001)
++
++#define CODEC_OPTION_1                           (0x1)
++#define CODEC_OPTION_2                           (0x0)
++
++#define BIT_CODEC_MODE_CODECPDZ                  (0x001)
++#define BIT_CODEC_MODE_CODECPDZ_M                (0x00000002)
++#define BIT_CODEC_MODE_SPARE                     (0x002)
++#define BIT_CODEC_MODE_SPARE_M                   (0x00000004)
++#define BIT_CODEC_MODE_SEL_16K                   (0x003)
++#define BIT_CODEC_MODE_SEL_16K_M                 (0x00000008)
++
++#define VOICE_MODE_RATE_08_000K                  (0x0)
++#define VOICE_MODE_RATE_16_000K                  (0x1)
++
++#define BIT_CODEC_MODE_APLL_RATE                 (0x004)
++#define BIT_CODEC_MODE_APLL_RATE_M               (0x000000F0)
++
++#define AUDIO_MODE_RATE_08_000                   (0x0)
++#define AUDIO_MODE_RATE_11_025                   (0x1)
++#define AUDIO_MODE_RATE_12_000                   (0x2)
++#define AUDIO_MODE_RATE_16_000                   (0x4)
++#define AUDIO_MODE_RATE_22_050                   (0x5)
++#define AUDIO_MODE_RATE_24_000                   (0x6)
++#define AUDIO_MODE_RATE_32_000                   (0x8)
++#define AUDIO_MODE_RATE_44_100                   (0x9)
++#define AUDIO_MODE_RATE_48_000                   (0xA)
++#define AUDIO_MODE_RATE_96_000                   (0xE)
++
++/* OPTION Fields */
++#define BIT_OPTION_ATXL1_EN                      (0x000)
++#define BIT_OPTION_ATXL1_EN_M                    (0x00000001)
++#define BIT_OPTION_ATXR1_EN                      (0x001)
++#define BIT_OPTION_ATXR1_EN_M                    (0x00000002)
++#define BIT_OPTION_ATXL2_VTXL_EN                 (0x002)
++#define BIT_OPTION_ATXL2_VTXL_EN_M               (0x00000004)
++#define BIT_OPTION_ATXR2_VTXR_EN                 (0x003)
++#define BIT_OPTION_ATXR2_VTXR_EN_M               (0x00000008)
++#define BIT_OPTION_ARXL1_VRX_EN                  (0x004)
++#define BIT_OPTION_ARXL1_VRX_EN_M                (0x00000010)
++#define BIT_OPTION_ARXR1_EN                      (0x005)
++#define BIT_OPTION_ARXR1_EN_M                    (0x00000020)
++#define BIT_OPTION_ARXL2_EN                      (0x006)
++#define BIT_OPTION_ARXL2_EN_M                    (0x00000040)
++#define BIT_OPTION_ARXR2_EN                      (0x007)
++#define BIT_OPTION_ARXR2_EN_M                    (0x00000080)
++/* MICBIAS_CTL Fields */
++#define BIT_MICBIAS_CTL_MICBIAS1_EN              (0x000)
++#define BIT_MICBIAS_CTL_MICBIAS1_EN_M            (0x00000001)
++#define BIT_MICBIAS_CTL_MICBIAS2_EN              (0x001)
++#define BIT_MICBIAS_CTL_MICBIAS2_EN_M            (0x00000002)
++#define BIT_MICBIAS_CTL_HSMICBIAS_EN             (0x002)
++#define BIT_MICBIAS_CTL_HSMICBIAS_EN_M           (0x00000004)
++#define BIT_MICBIAS_CTL_MICBIAS1_CTL             (0x005)
++#define BIT_MICBIAS_CTL_MICBIAS1_CTL_M           (0x00000020)
++#define BIT_MICBIAS_CTL_MICBIAS2_CTL             (0x006)
++#define BIT_MICBIAS_CTL_MICBIAS2_CTL_M           (0x00000040)
++#define BIT_MICBIAS_CTL_SPARE                    (0x007)
++#define BIT_MICBIAS_CTL_SPARE_M                  (0x00000080)
++/* ANAMICL Fields */
++#define BIT_ANAMICL_MAINMIC_EN                   (0x000)
++#define BIT_ANAMICL_MAINMIC_EN_M                 (0x00000001)
++#define BIT_ANAMICL_HSMIC_EN                     (0x001)
++#define BIT_ANAMICL_HSMIC_EN_M                   (0x00000002)
++#define BIT_ANAMICL_AUXL_EN                      (0x002)
++#define BIT_ANAMICL_AUXL_EN_M                    (0x00000004)
++#define BIT_ANAMICL_CKMIC_EN                     (0x003)
++#define BIT_ANAMICL_CKMIC_EN_M                   (0x00000008)
++#define BIT_ANAMICL_MICAMPL_EN                   (0x004)
++#define BIT_ANAMICL_MICAMPL_EN_M                 (0x00000010)
++#define BIT_ANAMICL_OFFSET_CNCL_SEL              (0x005)
++#define BIT_ANAMICL_OFFSET_CNCL_SEL_M            (0x00000060)
++#define BIT_ANAMICL_CNCL_OFFSET_START            (0x007)
++#define BIT_ANAMICL_CNCL_OFFSET_START_M          (0x00000080)
++/* ANAMICR Fields */
++#define BIT_ANAMICR_SUBMIC_EN                    (0x000)
++#define BIT_ANAMICR_SUBMIC_EN_M                  (0x00000001)
++#define BIT_ANAMICR_AUXR_EN                      (0x002)
++#define BIT_ANAMICR_AUXR_EN_M                    (0x00000004)
++#define BIT_ANAMICR_MICAMPR_EN                   (0x004)
++#define BIT_ANAMICR_MICAMPR_EN_M                 (0x00000010)
++/* AVADC_CTL Fields */
++#define BIT_AVADC_CTL_ADCR_EN                    (0x001)
++#define BIT_AVADC_CTL_ADCR_EN_M                  (0x00000002)
++#define BIT_AVADC_CTL_AVADC_CLK_PRIORITY         (0x002)
++#define BIT_AVADC_CTL_AVADC_CLK_PRIORITY_M       (0x00000004)
++#define BIT_AVADC_CTL_ADCL_EN                    (0x003)
++#define BIT_AVADC_CTL_ADCL_EN_M                  (0x00000008)
++/* ADCMICSEL Fields */
++#define BIT_ADCMICSEL_TX1IN_SEL                  (0x000)
++#define BIT_ADCMICSEL_TX1IN_SEL_M                (0x00000001)
++#define BIT_ADCMICSEL_DIGMIC0_EN                 (0x001)
++#define BIT_ADCMICSEL_DIGMIC0_EN_M               (0x00000002)
++#define BIT_ADCMICSEL_TX2IN_SEL                  (0x002)
++#define BIT_ADCMICSEL_TX2IN_SEL_M                (0x00000004)
++#define BIT_ADCMICSEL_DIGMIC1_EN                 (0x003)
++#define BIT_ADCMICSEL_DIGMIC1_EN_M               (0x00000008)
++/* DIGMIXING Fields */
++#define BIT_DIGMIXING_VTX_MIXING                 (0x002)
++#define BIT_DIGMIXING_VTX_MIXING_M               (0x0000000C)
++#define BIT_DIGMIXING_ARX2_MIXING                (0x004)
++#define BIT_DIGMIXING_ARX2_MIXING_M              (0x00000030)
++#define BIT_DIGMIXING_ARX1_MIXING                (0x006)
++#define BIT_DIGMIXING_ARX1_MIXING_M              (0x000000C0)
++#define INPUT_GAIN_MIN                           (0x00)
++#define INPUT_GAIN_MAX                           (0x1F)
++/* ATXL1PGA Fields */
++#define BIT_ATXL1PGA_ATXL1PGA_GAIN               (0x000)
++#define BIT_ATXL1PGA_ATXL1PGA_GAIN_M             (0x0000001F)
++/* ATXR1PGA Fields */
++#define BIT_ATXR1PGA_ATXR1PGA_GAIN               (0x000)
++#define BIT_ATXR1PGA_ATXR1PGA_GAIN_M             (0x0000001F)
++/* AVTXL2PGA Fields */
++#define BIT_AVTXL2PGA_AVTXL2PGA_GAIN             (0x000)
++#define BIT_AVTXL2PGA_AVTXL2PGA_GAIN_M           (0x0000001F)
++/* AVTXR2PGA Fields */
++#define BIT_AVTXR2PGA_AVTXR2PGA_GAIN             (0x000)
++#define BIT_AVTXR2PGA_AVTXR2PGA_GAIN_M           (0x0000001F)
++/* AUDIO_IF Fields */
++#define BIT_AUDIO_IF_AIF_EN                      (0x000)
++#define BIT_AUDIO_IF_AIF_EN_M                    (0x00000001)
++#define BIT_AUDIO_IF_CLK256FS_EN                 (0x001)
++#define BIT_AUDIO_IF_CLK256FS_EN_M               (0x00000002)
++#define BIT_AUDIO_IF_AIF_TRI_EN                  (0x002)
++#define BIT_AUDIO_IF_AIF_TRI_EN_M                (0x00000004)
++
++#define AUDIO_DATA_FORMAT_I2S                    (0x0)
++#define AUDIO_DATA_FORMAT_LJUST                  (0x1)
++#define AUDIO_DATA_FORMAT_RJUST                  (0x2)
++#define AUDIO_DATA_FORMAT_TDM                    (0x3)
++
++#define BIT_AUDIO_IF_AIF_FORMAT                  (0x003)
++#define BIT_AUDIO_IF_AIF_FORMAT_M                (0x00000018)
++
++#define AUDIO_DATA_WIDTH_16SAMPLE_16DATA         (0x0)
++#define AUDIO_DATA_WIDTH_32SAMPLE_16DATA         (0x2)
++#define AUDIO_DATA_WIDTH_32SAMPLE_24DATA         (0x3)
++
++#define BIT_AUDIO_IF_DATA_WIDTH                  (0x005)
++#define BIT_AUDIO_IF_DATA_WIDTH_M                (0x00000060)
++#define BIT_AUDIO_IF_AIF_SLAVE_EN                (0x007)
++#define BIT_AUDIO_IF_AIF_SLAVE_EN_M              (0x00000080)
++/* VOICE_IF Fields */
++#define BIT_VOICE_IF_VIF_EN                      (0x000)
++#define BIT_VOICE_IF_VIF_EN_M                    (0x00000001)
++#define BIT_VOICE_IF_VIF_SUB_EN                  (0x001)
++#define BIT_VOICE_IF_VIF_SUB_EN_M                (0x00000002)
++#define BIT_VOICE_IF_VIF_TRI_EN                  (0x002)
++#define BIT_VOICE_IF_VIF_TRI_EN_M                (0x00000004)
++#define BIT_VOICE_IF_VIF_FORMAT                  (0x003)
++#define BIT_VOICE_IF_VIF_FORMAT_M                (0x00000008)
++#define BIT_VOICE_IF_VIF_SWAP                    (0x004)
++#define BIT_VOICE_IF_VIF_SWAP_M                  (0x00000010)
++#define BIT_VOICE_IF_VIF_DOUT_EN                 (0x005)
++#define BIT_VOICE_IF_VIF_DOUT_EN_M               (0x00000020)
++#define BIT_VOICE_IF_VIF_DIN_EN                  (0x006)
++#define BIT_VOICE_IF_VIF_DIN_EN_M                (0x00000040)
++#define BIT_VOICE_IF_VIF_SLAVE_EN                (0x007)
++#define BIT_VOICE_IF_VIF_SLAVE_EN_M              (0x00000080)
++/* volume range */
++#define OUTPUT_GAIN_MIN                          (0x00)
++#define OUTPUT_GAIN_MAX                          (0x3F)
++#define AUDIO_OUTPUT_COARSE_GAIN_LOW             (0x0)
++#define AUDIO_OUTPUT_COARSE_GAIN_6DB             (0x1)
++#define AUDIO_OUTPUT_COARSE_GAIN_12DB            (0x2)
++
++/* ARXR1PGA Fields */
++#define BIT_ARXR1PGA_ARXR1PGA_FGAIN              (0x000)
++#define BIT_ARXR1PGA_ARXR1PGA_FGAIN_M            (0x0000003F)
++#define BIT_ARXR1PGA_ARXR1PGA_CGAIN              (0x006)
++#define BIT_ARXR1PGA_ARXR1PGA_CGAIN_M            (0x000000C0)
++/* ARXL1PGA Fields */
++#define BIT_ARXL1PGA_ARXL1PGA_FGAIN              (0x000)
++#define BIT_ARXL1PGA_ARXL1PGA_FGAIN_M            (0x0000003F)
++#define BIT_ARXL1PGA_ARXL1PGA_CGAIN              (0x006)
++#define BIT_ARXL1PGA_ARXL1PGA_CGAIN_M            (0x000000C0)
++/* ARXR2PGA Fields */
++#define BIT_ARXR2PGA_ARXR2PGA_FGAIN              (0x000)
++#define BIT_ARXR2PGA_ARXR2PGA_FGAIN_M            (0x0000003F)
++#define BIT_ARXR2PGA_ARXR2PGA_CGAIN              (0x006)
++#define BIT_ARXR2PGA_ARXR2PGA_CGAIN_M            (0x000000C0)
++/* ARXL2PGA Fields */
++#define BIT_ARXL2PGA_ARXL2PGA_FGAIN              (0x000)
++#define BIT_ARXL2PGA_ARXL2PGA_FGAIN_M            (0x0000003F)
++#define BIT_ARXL2PGA_ARXL2PGA_CGAIN              (0x006)
++#define BIT_ARXL2PGA_ARXL2PGA_CGAIN_M            (0x000000C0)
++/* VRXPGA Fields */
++#define BIT_VRXPGA_VRXPGA_GAIN                   (0x000)
++#define BIT_VRXPGA_VRXPGA_GAIN_M                 (0x0000003F)
++/* VSTPGA Fields */
++#define BIT_VSTPGA_VSTPGA_GAIN                   (0x000)
++#define BIT_VSTPGA_VSTPGA_GAIN_M                 (0x0000003F)
++#define SIDETONE_MAX_GAIN                        (0x29)
++/* VRX2ARXPGA Fields */
++#define BIT_VRX2ARXPGA_VRX2ARXPGA_GAIN           (0x000)
++#define BIT_VRX2ARXPGA_VRX2ARXPGA_GAIN_M         (0x0000001F)
++/* AVDAC_CTL Fields */
++#define BIT_AVDAC_CTL_ADACR1_EN                  (0x000)
++#define BIT_AVDAC_CTL_ADACR1_EN_M                (0x00000001)
++#define BIT_AVDAC_CTL_ADACL1_EN                  (0x001)
++#define BIT_AVDAC_CTL_ADACL1_EN_M                (0x00000002)
++#define BIT_AVDAC_CTL_ADACR2_EN                  (0x002)
++#define BIT_AVDAC_CTL_ADACR2_EN_M                (0x00000004)
++#define BIT_AVDAC_CTL_ADACL2_EN                  (0x003)
++#define BIT_AVDAC_CTL_ADACL2_EN_M                (0x00000008)
++#define BIT_AVDAC_CTL_VDAC_EN                    (0x004)
++#define BIT_AVDAC_CTL_VDAC_EN_M                  (0x00000010)
++/* ARX2VTXPGA Fields */
++#define BIT_ARX2VTXPGA_ARX2VTXPGA_GAIN           (0x000)
++#define BIT_ARX2VTXPGA_ARX2VTXPGA_GAIN_M         (0x0000003F)
++
++#define ARX_APGA_MIN                             (0x12)
++#define ARX_APGA_MAX                             (0x00)
++
++/* ARXL1_APGA_CTL Fields */
++#define BIT_ARXL1_APGA_CTL_ARXL1_PDZ             (0x000)
++#define BIT_ARXL1_APGA_CTL_ARXL1_PDZ_M           (0x00000001)
++#define BIT_ARXL1_APGA_CTL_ARXL1_DA_EN           (0x001)
++#define BIT_ARXL1_APGA_CTL_ARXL1_DA_EN_M         (0x00000002)
++#define BIT_ARXL1_APGA_CTL_ARXL1_FM_EN           (0x002)
++#define BIT_ARXL1_APGA_CTL_ARXL1_FM_EN_M         (0x00000004)
++#define BIT_ARXL1_APGA_CTL_ARXL1_GAIN_SET        (0x003)
++#define BIT_ARXL1_APGA_CTL_ARXL1_GAIN_SET_M      (0x000000F8)
++/* ARXR1_APGA_CTL Fields */
++#define BIT_ARXR1_APGA_CTL_ARXR1_PDZ             (0x000)
++#define BIT_ARXR1_APGA_CTL_ARXR1_PDZ_M           (0x00000001)
++#define BIT_ARXR1_APGA_CTL_ARXR1_DA_EN           (0x001)
++#define BIT_ARXR1_APGA_CTL_ARXR1_DA_EN_M         (0x00000002)
++#define BIT_ARXR1_APGA_CTL_ARXR1_FM_EN           (0x002)
++#define BIT_ARXR1_APGA_CTL_ARXR1_FM_EN_M         (0x00000004)
++#define BIT_ARXR1_APGA_CTL_ARXR1_GAIN_SET        (0x003)
++#define BIT_ARXR1_APGA_CTL_ARXR1_GAIN_SET_M      (0x000000F8)
++/* ARXL2_APGA_CTL Fields */
++#define BIT_ARXL2_APGA_CTL_ARXL2_PDZ             (0x000)
++#define BIT_ARXL2_APGA_CTL_ARXL2_PDZ_M           (0x00000001)
++#define BIT_ARXL2_APGA_CTL_ARXL2_DA_EN           (0x001)
++#define BIT_ARXL2_APGA_CTL_ARXL2_DA_EN_M         (0x00000002)
++#define BIT_ARXL2_APGA_CTL_ARXL2_FM_EN           (0x002)
++#define BIT_ARXL2_APGA_CTL_ARXL2_FM_EN_M         (0x00000004)
++#define BIT_ARXL2_APGA_CTL_ARXL2_GAIN_SET        (0x003)
++#define BIT_ARXL2_APGA_CTL_ARXL2_GAIN_SET_M      (0x000000F8)
++/* ARXR2_APGA_CTL Fields */
++#define BIT_ARXR2_APGA_CTL_ARXR2_PDZ             (0x000)
++#define BIT_ARXR2_APGA_CTL_ARXR2_PDZ_M           (0x00000001)
++#define BIT_ARXR2_APGA_CTL_ARXR2_DA_EN           (0x001)
++#define BIT_ARXR2_APGA_CTL_ARXR2_DA_EN_M         (0x00000002)
++#define BIT_ARXR2_APGA_CTL_ARXR2_FM_EN           (0x002)
++#define BIT_ARXR2_APGA_CTL_ARXR2_FM_EN_M         (0x00000004)
++#define BIT_ARXR2_APGA_CTL_ARXR2_GAIN_SET        (0x003)
++#define BIT_ARXR2_APGA_CTL_ARXR2_GAIN_SET_M      (0x000000F8)
++/* ATX2ARXPGA Fields */
++#define BIT_ATX2ARXPGA_ATX2ARXR_PGA              (0x000)
++#define BIT_ATX2ARXPGA_ATX2ARXR_PGA_M            (0x00000007)
++#define BIT_ATX2ARXPGA_ATX2ARXL_PGA              (0x003)
++#define BIT_ATX2ARXPGA_ATX2ARXL_PGA_M            (0x00000038)
++/* BT_IF Fields */
++#define BIT_BT_IF_BT_EN                          (0x000)
++#define BIT_BT_IF_BT_EN_M                        (0x00000001)
++#define BIT_BT_IF_BT_TRI_EN                      (0x002)
++#define BIT_BT_IF_BT_TRI_EN_M                    (0x00000004)
++#define BIT_BT_IF_BT_SWAP                        (0x004)
++#define BIT_BT_IF_BT_SWAP_M                      (0x00000010)
++#define BIT_BT_IF_BT_DOUT_EN                     (0x005)
++#define BIT_BT_IF_BT_DOUT_EN_M                   (0x00000020)
++#define BIT_BT_IF_BT_DIN_EN                      (0x006)
++#define BIT_BT_IF_BT_DIN_EN_M                    (0x00000040)
++#define BIT_BT_IF_SPARE                          (0x007)
++#define BIT_BT_IF_SPARE_M                        (0x00000080)
++/* BTPGA Fields */
++#define BIT_BTPGA_BTRXPGA_GAIN                   (0x000)
++#define BIT_BTPGA_BTRXPGA_GAIN_M                 (0x0000000F)
++#define BIT_BTPGA_BTTXPGA_GAIN                   (0x004)
++#define BIT_BTPGA_BTTXPGA_GAIN_M                 (0x000000F0)
++/* BTSTPGA Fields */
++#define BIT_BTSTPGA_BTSTPGA_GAIN                 (0x000)
++#define BIT_BTSTPGA_BTSTPGA_GAIN_M               (0x0000003F)
++/* EAR_CTL Fields */
++#define BIT_EAR_CTL_EAR_VOICE_EN                 (0x000)
++#define BIT_EAR_CTL_EAR_VOICE_EN_M               (0x00000001)
++#define BIT_EAR_CTL_EAR_AL1_EN                   (0x001)
++#define BIT_EAR_CTL_EAR_AL1_EN_M                 (0x00000002)
++#define BIT_EAR_CTL_EAR_AL2_EN                   (0x002)
++#define BIT_EAR_CTL_EAR_AL2_EN_M                 (0x00000004)
++#define BIT_EAR_CTL_EAR_AR1_EN                   (0x003)
++#define BIT_EAR_CTL_EAR_AR1_EN_M                 (0x00000008)
++#define BIT_EAR_CTL_EAR_GAIN                     (0x004)
++#define BIT_EAR_CTL_EAR_GAIN_M                   (0x00000030)
++#define BIT_EAR_CTL_SPARE                        (0x006)
++#define BIT_EAR_CTL_SPARE_M                      (0x00000040)
++#define BIT_EAR_CTL_EAR_OUTLOW_EN                (0x007)
++#define BIT_EAR_CTL_EAR_OUTLOW_EN_M              (0x00000080)
++/* HS_GAIN_SET Fields */
++#define BIT_HS_GAIN_SET_HSL_GAIN                 (0x000)
++#define BIT_HS_GAIN_SET_HSL_GAIN_M               (0x00000003)
++#define BIT_HS_GAIN_SET_HSR_GAIN                 (0x002)
++#define BIT_HS_GAIN_SET_HSR_GAIN_M               (0x0000000C)
++#define BIT_HS_GAIN_SET_SPARE                    (0x006)
++#define BIT_HS_GAIN_SET_SPARE_M                  (0x00000040)
++/* HS_SEL Fields */
++#define BIT_HS_SEL_HSOL_VOICE_EN                 (0x000)
++#define BIT_HS_SEL_HSOL_VOICE_EN_M               (0x00000001)
++#define BIT_HS_SEL_HSOL_AL1_EN                   (0x001)
++#define BIT_HS_SEL_HSOL_AL1_EN_M                 (0x00000002)
++#define BIT_HS_SEL_HSOL_AL2_EN                   (0x002)
++#define BIT_HS_SEL_HSOL_AL2_EN_M                 (0x00000004)
++#define BIT_HS_SEL_HSOR_VOICE_EN                 (0x003)
++#define BIT_HS_SEL_HSOR_VOICE_EN_M               (0x00000008)
++#define BIT_HS_SEL_HSOR_AR1_EN                   (0x004)
++#define BIT_HS_SEL_HSOR_AR1_EN_M                 (0x00000010)
++#define BIT_HS_SEL_HSOR_AR2_EN                   (0x005)
++#define BIT_HS_SEL_HSOR_AR2_EN_M                 (0x00000020)
++#define BIT_HS_SEL_HS_OUTLOW_EN                  (0x006)
++#define BIT_HS_SEL_HS_OUTLOW_EN_M                (0x00000040)
++#define BIT_HS_SEL_HSR_INV_EN                    (0x007)
++#define BIT_HS_SEL_HSR_INV_EN_M                  (0x00000080)
++/* HS_POPN_SET Fields */
++#define BIT_HS_POPN_SET_RAMP_EN                  (0x001)
++#define BIT_HS_POPN_SET_RAMP_EN_M                (0x00000002)
++#define BIT_HS_POPN_SET_RAMP_DELAY               (0x002)
++#define BIT_HS_POPN_SET_RAMP_DELAY_M             (0x0000001C)
++#define BIT_HS_POPN_SET_EXTMUTE                  (0x005)
++#define BIT_HS_POPN_SET_EXTMUTE_M                (0x00000020)
++#define BIT_HS_POPN_SET_VMID_EN                  (0x006)
++#define BIT_HS_POPN_SET_VMID_EN_M                (0x00000040)
++/* PREDL_CTL Fields */
++#define BIT_PREDL_CTL_PREDL_VOICE_EN             (0x000)
++#define BIT_PREDL_CTL_PREDL_VOICE_EN_M           (0x00000001)
++#define BIT_PREDL_CTL_PREDL_AL1_EN               (0x001)
++#define BIT_PREDL_CTL_PREDL_AL1_EN_M             (0x00000002)
++#define BIT_PREDL_CTL_PREDL_AL2_EN               (0x002)
++#define BIT_PREDL_CTL_PREDL_AL2_EN_M             (0x00000004)
++#define BIT_PREDL_CTL_PREDL_AR2_EN               (0x003)
++#define BIT_PREDL_CTL_PREDL_AR2_EN_M             (0x00000008)
++#define BIT_PREDL_CTL_PREDL_GAIN                 (0x004)
++#define BIT_PREDL_CTL_PREDL_GAIN_M               (0x00000030)
++#define BIT_PREDL_CTL_PREDL_OUTLOW_EN            (0x007)
++#define BIT_PREDL_CTL_PREDL_OUTLOW_EN_M          (0x00000080)
++/* PREDR_CTL Fields */
++#define BIT_PREDR_CTL_PREDR_VOICE_EN             (0x000)
++#define BIT_PREDR_CTL_PREDR_VOICE_EN_M           (0x00000001)
++#define BIT_PREDR_CTL_PREDR_AR1_EN               (0x001)
++#define BIT_PREDR_CTL_PREDR_AR1_EN_M             (0x00000002)
++#define BIT_PREDR_CTL_PREDR_AR2_EN               (0x002)
++#define BIT_PREDR_CTL_PREDR_AR2_EN_M             (0x00000004)
++#define BIT_PREDR_CTL_PREDR_AL2_EN               (0x003)
++#define BIT_PREDR_CTL_PREDR_AL2_EN_M             (0x00000008)
++#define BIT_PREDR_CTL_PREDR_GAIN                 (0x004)
++#define BIT_PREDR_CTL_PREDR_GAIN_M               (0x00000030)
++#define BIT_PREDR_CTL_PREDR_OUTLOW_EN            (0x007)
++#define BIT_PREDR_CTL_PREDR_OUTLOW_EN_M          (0x00000080)
++/* PRECKL_CTL Fields */
++#define BIT_PRECKL_CTL_PRECKL_VOICE_EN           (0x000)
++#define BIT_PRECKL_CTL_PRECKL_VOICE_EN_M         (0x00000001)
++#define BIT_PRECKL_CTL_PRECKL_AL1_EN             (0x001)
++#define BIT_PRECKL_CTL_PRECKL_AL1_EN_M           (0x00000002)
++#define BIT_PRECKL_CTL_PRECKL_AL2_EN             (0x002)
++#define BIT_PRECKL_CTL_PRECKL_AL2_EN_M           (0x00000004)
++#define BIT_PRECKL_CTL_PRECKL_GAIN               (0x004)
++#define BIT_PRECKL_CTL_PRECKL_GAIN_M             (0x00000030)
++#define BIT_PRECKL_CTL_PRECKL_EN                 (0x006)
++#define BIT_PRECKL_CTL_PRECKL_EN_M               (0x00000040)
++/* PRECKR_CTL Fields */
++#define BIT_PRECKR_CTL_PRECKR_VOICE_EN           (0x000)
++#define BIT_PRECKR_CTL_PRECKR_VOICE_EN_M         (0x00000001)
++#define BIT_PRECKR_CTL_PRECKR_AR1_EN             (0x001)
++#define BIT_PRECKR_CTL_PRECKR_AR1_EN_M           (0x00000002)
++#define BIT_PRECKR_CTL_PRECKR_AR2_EN             (0x002)
++#define BIT_PRECKR_CTL_PRECKR_AR2_EN_M           (0x00000004)
++#define BIT_PRECKR_CTL_PRECKR_GAIN               (0x004)
++#define BIT_PRECKR_CTL_PRECKR_GAIN_M             (0x00000030)
++#define BIT_PRECKR_CTL_PRECKR_EN                 (0x006)
++#define BIT_PRECKR_CTL_PRECKR_EN_M               (0x00000040)
++#define HANDS_FREEL_VOICE                        (0x0)
++#define HANDS_FREEL_AL1                          (0x1)
++#define HANDS_FREEL_AL2                          (0x2)
++#define HANDS_FREEL_AR2                          (0x3)
++#define HANDS_FREER_VOICE                        (0x0)
++#define HANDS_FREER_AR1                          (0x1)
++#define HANDS_FREER_AR2                          (0x2)
++#define HANDS_FREER_AL2                          (0x3)
++/* HFL_CTL Fields */
++#define BIT_HFL_CTL_HFL_INPUT_SEL                (0x000)
++#define BIT_HFL_CTL_HFL_INPUT_SEL_M              (0x00000003)
++#define BIT_HFL_CTL_HFL_HB_EN                    (0x002)
++#define BIT_HFL_CTL_HFL_HB_EN_M                  (0x00000004)
++#define BIT_HFL_CTL_HFL_LOOP_EN                  (0x003)
++#define BIT_HFL_CTL_HFL_LOOP_EN_M                (0x00000008)
++#define BIT_HFL_CTL_HFL_RAMP_EN                  (0x004)
++#define BIT_HFL_CTL_HFL_RAMP_EN_M                (0x00000010)
++#define BIT_HFL_CTL_HFL_REF_EN                   (0x005)
++#define BIT_HFL_CTL_HFL_REF_EN_M                 (0x00000020)
++/* HFR_CTL Fields */
++#define BIT_HFR_CTL_HFR_INPUT_SEL                (0x000)
++#define BIT_HFR_CTL_HFR_INPUT_SEL_M              (0x00000003)
++#define BIT_HFR_CTL_HFR_HB_EN                    (0x002)
++#define BIT_HFR_CTL_HFR_HB_EN_M                  (0x00000004)
++#define BIT_HFR_CTL_HFR_LOOP_EN                  (0x003)
++#define BIT_HFR_CTL_HFR_LOOP_EN_M                (0x00000008)
++#define BIT_HFR_CTL_HFR_RAMP_EN                  (0x004)
++#define BIT_HFR_CTL_HFR_RAMP_EN_M                (0x00000010)
++#define BIT_HFR_CTL_HFR_REF_EN                   (0x005)
++#define BIT_HFR_CTL_HFR_REF_EN_M                 (0x00000020)
++/* ALC_CTL Fields */
++#define BIT_ALC_CTL_ALC_WAIT                     (0x000)
++#define BIT_ALC_CTL_ALC_WAIT_M                   (0x00000007)
++#define BIT_ALC_CTL_MAINMIC_ALC_EN               (0x003)
++#define BIT_ALC_CTL_MAINMIC_ALC_EN_M             (0x00000008)
++#define BIT_ALC_CTL_SUBMIC_ALC_EN                (0x004)
++#define BIT_ALC_CTL_SUBMIC_ALC_EN_M              (0x00000010)
++#define BIT_ALC_CTL_ALC_MODE                     (0x005)
++#define BIT_ALC_CTL_ALC_MODE_M                   (0x00000020)
++#define BIT_ALC_CTL_SPARE1                       (0x006)
++#define BIT_ALC_CTL_SPARE1_M                     (0x00000040)
++#define BIT_ALC_CTL_SPARE2                       (0x007)
++#define BIT_ALC_CTL_SPARE2_M                     (0x00000080)
++/* ALC_SET1 Fields */
++#define BIT_ALC_SET1_ALC_MIN_LIMIT               (0x000)
++#define BIT_ALC_SET1_ALC_MIN_LIMIT_M             (0x00000007)
++#define BIT_ALC_SET1_ALC_MAX_LIMIT               (0x003)
++#define BIT_ALC_SET1_ALC_MAX_LIMIT_M             (0x00000038)
++/* ALC_SET2 Fields */
++#define BIT_ALC_SET2_ALC_RELEASE                 (0x000)
++#define BIT_ALC_SET2_ALC_RELEASE_M               (0x00000007)
++#define BIT_ALC_SET2_ALC_ATTACK                  (0x003)
++#define BIT_ALC_SET2_ALC_ATTACK_M                (0x00000038)
++#define BIT_ALC_SET2_ALC_STEP                    (0x006)
++#define BIT_ALC_SET2_ALC_STEP_M                  (0x00000040)
++/* BOOST_CTL Fields */
++#define BIT_BOOST_CTL_EFFECT                     (0x000)
++#define BIT_BOOST_CTL_EFFECT_M                   (0x00000003)
++/* SOFTVOL_CTL Fields */
++#define BIT_SOFTVOL_CTL_SOFTVOL_EN               (0x000)
++#define BIT_SOFTVOL_CTL_SOFTVOL_EN_M             (0x00000001)
++#define BIT_SOFTVOL_CTL_SOFTVOL_SET              (0x005)
++#define BIT_SOFTVOL_CTL_SOFTVOL_SET_M            (0x000000E0)
++/* DTMF_FREQSEL Fields */
++#define BIT_DTMF_FREQSEL_FREQSEL                 (0x000)
++#define BIT_DTMF_FREQSEL_FREQSEL_M               (0x0000001F)
++#define BIT_DTMF_FREQSEL_SPARE1                  (0x006)
++#define BIT_DTMF_FREQSEL_SPARE1_M                (0x00000040)
++#define BIT_DTMF_FREQSEL_SPARE2                  (0x007)
++#define BIT_DTMF_FREQSEL_SPARE2_M                (0x00000080)
++/* DTMF_TONEXT1H Fields */
++#define BIT_DTMF_TONEXT1H_EXT_TONE1H             (0x000)
++#define BIT_DTMF_TONEXT1H_EXT_TONE1H_M           (0x000000FF)
++/* DTMF_TONEXT1L Fields */
++#define BIT_DTMF_TONEXT1L_EXT_TONE1L             (0x000)
++#define BIT_DTMF_TONEXT1L_EXT_TONE1L_M           (0x000000FF)
++/* DTMF_TONEXT2H Fields */
++#define BIT_DTMF_TONEXT2H_EXT_TONE2H             (0x000)
++#define BIT_DTMF_TONEXT2H_EXT_TONE2H_M           (0x000000FF)
++/* DTMF_TONEXT2L Fields */
++#define BIT_DTMF_TONEXT2L_EXT_TONE2L             (0x000)
++#define BIT_DTMF_TONEXT2L_EXT_TONE2L_M           (0x000000FF)
++/* DTMF_TONOFF Fields */
++#define BIT_DTMF_TONOFF_TONE_ON_TIME             (0x000)
++#define BIT_DTMF_TONOFF_TONE_ON_TIME_M           (0x0000000F)
++#define BIT_DTMF_TONOFF_TONE_OFF_TIME            (0x004)
++#define BIT_DTMF_TONOFF_TONE_OFF_TIME_M          (0x000000F0)
++/* DTMF_WANONOFF Fields */
++#define BIT_DTMF_WANONOFF_WAMBLE_ON_TIME         (0x000)
++#define BIT_DTMF_WANONOFF_WAMBLE_ON_TIME_M       (0x0000000F)
++#define BIT_DTMF_WANONOFF_WAMBLE_OFF_TIME        (0x004)
++#define BIT_DTMF_WANONOFF_WAMBLE_OFF_TIME_M      (0x000000F0)
++/* I2S_RX_SCRAMBLE_H Fields */
++#define BIT_I2S_RX_SCRAMBLE_H_I2S_RX_SCRAMBLE_H  (0x000)
++#define BIT_I2S_RX_SCRAMBLE_H_I2S_RX_SCRAMBLE_H_M (0x000000FF)
++/* I2S_RX_SCRAMBLE_M Fields */
++#define BIT_I2S_RX_SCRAMBLE_M_I2S_RX_SCRAMBLE_M  (0x000)
++#define BIT_I2S_RX_SCRAMBLE_M_I2S_RX_SCRAMBLE_M_M (0x000000FF)
++/* I2S_RX_SCRAMBLE_L Fields */
++#define BIT_I2S_RX_SCRAMBLE_L_I2S_RX_SCRAMBLE_L  (0x000)
++#define BIT_I2S_RX_SCRAMBLE_L_I2S_RX_SCRAMBLE_L_M (0x000000FF)
++/* APLL_CTL Fields */
++#define APLL_CTL_FREQ_19_2MHZ                    (0x5)
++#define APLL_CTL_FREQ_26_0MHZ                    (0x6)
++#define APLL_CTL_FREQ_38_4MHZ                    (0xF)
++#define BIT_APLL_CTL_APLL_INFREQ                 (0x000)
++#define BIT_APLL_CTL_APLL_INFREQ_M               (0x0000000F)
++#define BIT_APLL_CTL_APLL_EN                     (0x004)
++#define BIT_APLL_CTL_APLL_EN_M                   (0x00000010)
++/* DTMF_CTL Fields */
++#define BIT_DTMF_CTL_TONE_EN                     (0x000)
++#define BIT_DTMF_CTL_TONE_EN_M                   (0x00000001)
++#define BIT_DTMF_CTL_DUAL_TONE_EN                (0x001)
++#define BIT_DTMF_CTL_DUAL_TONE_EN_M              (0x00000002)
++#define BIT_DTMF_CTL_TONE_PATTERN                (0x002)
++#define BIT_DTMF_CTL_TONE_PATTERN_M              (0x00000004)
++#define BIT_DTMF_CTL_TONE_MODE                   (0x003)
++#define BIT_DTMF_CTL_TONE_MODE_M                 (0x00000008)
++/* DTMF_PGA_CTL2 Fields */
++#define BIT_DTMF_PGA_CTL2_TONE3_GAIN             (0x000)
++#define BIT_DTMF_PGA_CTL2_TONE3_GAIN_M           (0x00000007)
++#define BIT_DTMF_PGA_CTL2_TONE4_GAIN             (0x004)
++#define BIT_DTMF_PGA_CTL2_TONE4_GAIN_M           (0x00000070)
++#define BIT_DTMF_PGA_CTL2_TONE_18DB_ATT          (0x007)
++#define BIT_DTMF_PGA_CTL2_TONE_18DB_ATT_M        (0x00000080)
++/* DTMF_PGA_CTL1 Fields */
++#define BIT_DTMF_PGA_CTL1_TONE1_GAIN             (0x000)
++#define BIT_DTMF_PGA_CTL1_TONE1_GAIN_M           (0x0000000F)
++#define BIT_DTMF_PGA_CTL1_TONE2_GAIN             (0x004)
++#define BIT_DTMF_PGA_CTL1_TONE2_GAIN_M           (0x000000F0)
++/* MISC_SET_1 Fields */
++#define BIT_MISC_SET_1_DIGMIC_LR_SWAP_EN         (0x000)
++#define BIT_MISC_SET_1_DIGMIC_LR_SWAP_EN_M       (0x00000001)
++#define BIT_MISC_SET_1_SPARE1                    (0x001)
++#define BIT_MISC_SET_1_SPARE1_M                  (0x00000002)
++#define BIT_MISC_SET_1_SPARE2                    (0x002)
++#define BIT_MISC_SET_1_SPARE2_M                  (0x00000004)
++#define BIT_MISC_SET_1_FMLOOP_EN                 (0x005)
++#define BIT_MISC_SET_1_FMLOOP_EN_M               (0x00000020)
++#define BIT_MISC_SET_1_SCRAMBLE_EN               (0x006)
++#define BIT_MISC_SET_1_SCRAMBLE_EN_M             (0x00000040)
++#define BIT_MISC_SET_1_CLK64_EN                  (0x007)
++#define BIT_MISC_SET_1_CLK64_EN_M                (0x00000080)
++/* PCMBTMUX Fields */
++#define BIT_PCMBTMUX_TNRXACT_BT                  (0x000)
++#define BIT_PCMBTMUX_TNRXACT_BT_M                (0x00000001)
++#define BIT_PCMBTMUX_TNTXACT_BT                  (0x001)
++#define BIT_PCMBTMUX_TNTXACT_BT_M                (0x00000002)
++#define BIT_PCMBTMUX_TNRXACT_PCM                 (0x002)
++#define BIT_PCMBTMUX_TNRXACT_PCM_M               (0x00000004)
++#define BIT_PCMBTMUX_TNTXACT_PCM                 (0x003)
++#define BIT_PCMBTMUX_TNTXACT_PCM_M               (0x00000008)
++#define BIT_PCMBTMUX_MUXRX_BT                    (0x005)
++#define BIT_PCMBTMUX_MUXRX_BT_M                  (0x00000020)
++#define BIT_PCMBTMUX_MUXRX_PCM                   (0x006)
++#define BIT_PCMBTMUX_MUXRX_PCM_M                 (0x00000040)
++#define BIT_PCMBTMUX_MUXTX_PCM                   (0x007)
++#define BIT_PCMBTMUX_MUXTX_PCM_M                 (0x00000080)
++/* RX_PATH_SEL Fields */
++#define BIT_RX_PATH_SEL_RXR1_SEL                 (0x000)
++#define BIT_RX_PATH_SEL_RXR1_SEL_M               (0x00000003)
++#define BIT_RX_PATH_SEL_RXL1_SEL                 (0x002)
++#define BIT_RX_PATH_SEL_RXL1_SEL_M               (0x0000000C)
++#define BIT_RX_PATH_SEL_RXR2_SEL                 (0x004)
++#define BIT_RX_PATH_SEL_RXR2_SEL_M               (0x00000010)
++#define BIT_RX_PATH_SEL_RXL2_SEL                 (0x005)
++#define BIT_RX_PATH_SEL_RXL2_SEL_M               (0x00000020)
++/* VDL_APGA_CTL Fields */
++#define BIT_VDL_APGA_CTL_VDL_PDZ                 (0x000)
++#define BIT_VDL_APGA_CTL_VDL_PDZ_M               (0x00000001)
++#define BIT_VDL_APGA_CTL_VDL_DA_EN               (0x001)
++#define BIT_VDL_APGA_CTL_VDL_DA_EN_M             (0x00000002)
++#define BIT_VDL_APGA_CTL_VDL_FM_EN               (0x002)
++#define BIT_VDL_APGA_CTL_VDL_FM_EN_M             (0x00000004)
++#define BIT_VDL_APGA_CTL_VDL_GAIN_SET            (0x003)
++#define BIT_VDL_APGA_CTL_VDL_GAIN_SET_M          (0x000000F8)
++/* VIBRA_CTL Fields */
++#define BIT_VIBRA_CTL_VIVRA_EN                   (0x000)
++#define BIT_VIBRA_CTL_VIVRA_EN_M                 (0x00000001)
++#define BIT_VIBRA_CTL_VIBRA_DIR                  (0x001)
++#define BIT_VIBRA_CTL_VIBRA_DIR_M                (0x00000002)
++#define BIT_VIBRA_CTL_VIBRA_AUDIO_SEL            (0x002)
++#define BIT_VIBRA_CTL_VIBRA_AUDIO_SEL_M          (0x0000000C)
++#define BIT_VIBRA_CTL_VIBRA_SEL                  (0x004)
++#define BIT_VIBRA_CTL_VIBRA_SEL_M                (0x00000010)
++#define BIT_VIBRA_CTL_VIBRA_DIR_SEL              (0x005)
++#define BIT_VIBRA_CTL_VIBRA_DIR_SEL_M            (0x00000020)
++#define BIT_VIBRA_CTL_SPARE                      (0x006)
++#define BIT_VIBRA_CTL_SPARE_M                    (0x00000040)
++/* VIBRA_SET Fields */
++#define BIT_VIBRA_SET_VIBRA_AVG_VAL              (0x000)
++#define BIT_VIBRA_SET_VIBRA_AVG_VAL_M            (0x000000FF)
++/* VIBRA_PWM_SET Fields */
++#define BIT_VIBRA_PWM_SET_PWM_ON                 (0x000)
++#define BIT_VIBRA_PWM_SET_PWM_ON_M               (0x000000FF)
++#define MICAM_GAIN_MIN                           (0x0)
++#define MICAM_GAIN_MAX                           (0x5)
++/* ANAMIC_GAIN Fields */
++#define BIT_ANAMIC_GAIN_MICAMPL_GAIN             (0x000)
++#define BIT_ANAMIC_GAIN_MICAMPL_GAIN_M           (0x00000007)
++#define BIT_ANAMIC_GAIN_MICAMPR_GAIN             (0x003)
++#define BIT_ANAMIC_GAIN_MICAMPR_GAIN_M           (0x00000038)
++/* MISC_SET_2 Fields */
++#define BIT_MISC_SET_2_SPARE1                    (0x000)
++#define BIT_MISC_SET_2_SPARE1_M                  (0x00000001)
++#define BIT_MISC_SET_2_VRX_HPF_BYP               (0x001)
++#define BIT_MISC_SET_2_VRX_HPF_BYP_M             (0x00000002)
++#define BIT_MISC_SET_2_VTX_HPF_BYP               (0x002)
++#define BIT_MISC_SET_2_VTX_HPF_BYP_M             (0x00000004)
++#define BIT_MISC_SET_2_ARX_HPF_BYP               (0x003)
++#define BIT_MISC_SET_2_ARX_HPF_BYP_M             (0x00000008)
++#define BIT_MISC_SET_2_VRX_3RD_HPF_BYP           (0x004)
++#define BIT_MISC_SET_2_VRX_3RD_HPF_BYP_M         (0x00000010)
++#define BIT_MISC_SET_2_ATX_HPF_BYP               (0x005)
++#define BIT_MISC_SET_2_ATX_HPF_BYP_M             (0x00000020)
++#define BIT_MISC_SET_2_VTX_3RD_HPF_BYP           (0x006)
++#define BIT_MISC_SET_2_VTX_3RD_HPF_BYP_M         (0x00000040)
++#define BIT_MISC_SET_2_SPARE2                    (0x007)
++#define BIT_MISC_SET_2_SPARE2_M                  (0x00000080)
++
++/************** INTERNAL DETAILS ********************/
++/*
++ * OUTPUT:
++ * =======
++ * OUTPUT_STEREO_HEADSET           SOUND_MASK_LINE1
++ * OUTPUT_HANDS_FREE_CLASSD        SOUND_MASK_SPEAKER
++ * OUTPUT_MONO_EARPIECE            SOUND_MASK_PHONEOUT (mono Sink)
++ *
++ * INPUT:
++ * ======
++ * INPUT_HEADSET_MIC               SOUND_MASK_LINE
++ * INPUT_MAIN_MIC + INPUT_SUB_MIC  SOUND_MASK_MIC
++ *
++ * CURRENT SOURCES:
++ * ===============
++ * SOUND_MIXER_OUTSRC - output source
++ * SOUND_MIXER_RECSRC - input source
++ * Operations:
++ * MIXER_READ() and MIXER_WRITE() to control the sources
++ *
++ * VOLUME CONTROL:
++ * ===============
++ * SOUND_MIXER_RECLEV - control the gain level of recording
++ * SOUND_MIXER_VOLUME - control the gain level of playback
++ * MIXER_WRITE and MIXER_READ with each of the device masks will
++ *                            control the coarse volume control of the device
++ */
++#define DIR_OUT                                  (0)
++#define DIR_IN                                   (1<<7)
++
++#define OUTPUT_VOLUME                            (DIR_OUT | 0)
++#define OUTPUT_STEREO_HEADSET                    (DIR_OUT | (1 << 0))
++#define OUTPUT_HANDS_FREE_CLASSD                 (DIR_OUT | (1 << 1))
++#define OUTPUT_MONO_EARPIECE                     (DIR_OUT | (1 << 2))
++#define OUTPUT_SIDETONE                          (DIR_OUT | (1 << 3))
++#define OUTPUT_CARKIT                            (DIR_OUT | (1 << 4))
++
++#define INPUT_VOLUME                             (DIR_IN | 0)
++#define INPUT_HEADSET_MIC                        (DIR_IN | (1 << 0))
++#define INPUT_MAIN_MIC                           (DIR_IN | (1 << 1))
++#define INPUT_SUB_MIC                            (DIR_IN | (1 << 2))
++#define INPUT_AUX                                (DIR_IN | (1 << 3))
++#define INPUT_CARKIT                             (DIR_IN | (1 << 4))
++
++#ifndef CONFIG_MACH_OMAP3EVM
++#define DEFAULT_INPUT_TWL_DEVICE                 INPUT_HEADSET_MIC
++#else
++#define DEFAULT_INPUT_TWL_DEVICE                 INPUT_AUX
++#endif
++#define DEFAULT_INPUT_LNX_DEVICE                 SOUND_MASK_LINE
++
++#define DEFAULT_OUTPUT_TWL_DEVICE                OUTPUT_STEREO_HEADSET
++#define DEFAULT_OUTPUT_LNX_DEVICE                SOUND_MASK_LINE1
++/* Recording devices */
++#define REC_SRC_MASK                             (SOUND_MASK_LINE | \
++						  SOUND_MASK_MIC)
++#define REC_MASK                                 (SOUND_MASK_RECLEV | \
++						  REC_SRC_MASK)
++/* play back devices */
++#define OUT_SRC_MASK                             (SOUND_MASK_LINE1 | \
++						  SOUND_MASK_SPEAKER | \
++						  SOUND_MASK_PHONEOUT)
++#define OUT_MASK                                 (SOUND_MASK_VOLUME | \
++						  OUT_SRC_MASK)
++#define DEV_MASK                                 (REC_MASK | \
++						  OUT_MASK)
++#define DEV_STEREO_DEV                           (SOUND_MASK_VOLUME | \
++						  SOUND_MASK_RECLEV | \
++						  SOUND_MASK_LINE1 | \
++						  SOUND_MASK_SPEAKER | \
++						  SOUND_MASK_MIC)
++
++#define STEREO_MODE                              (0x1)
++#define MONO_MODE                                (0x2)
++
++#define MIXER_DEVICE                             (0x0)
++#define DSP_DEVICE                               (0x1)
++
++#define AUDIO_MAX_INPUT_VOLUME                   100
++#define AUDIO_MAX_OUTPUT_VOLUME                  100
++#define COMPUTE_PRECISION                        100
++#define AUDIO_INPUT_INCREMENT                    ((AUDIO_MAX_INPUT_VOLUME * \
++						   COMPUTE_PRECISION)/\
++						   (INPUT_GAIN_MAX))
++#define AUDIO_OUTPUT_INCREMENT                   ((AUDIO_MAX_OUTPUT_VOLUME * \
++						   COMPUTE_PRECISION)/\
++						   (OUTPUT_GAIN_MAX))
++#define AUDIO_DEF_COARSE_VOLUME_LEVEL            AUDIO_OUTPUT_COARSE_GAIN_6DB
++#define MIC_AMP_INCR                             ((AUDIO_MAX_INPUT_VOLUME * \
++						   COMPUTE_PRECISION)/\
++						   (MICAM_GAIN_MAX))
++#define ARX_APGA_INCR                            ((AUDIO_MAX_OUTPUT_VOLUME * \
++						   COMPUTE_PRECISION)/\
++						   (ARX_APGA_MIN))
++/* EAR/ HS Values */
++#define NON_LIN_VALS                             {3, 2, 1}
++#define NON_LIN_GAIN_MAX                         3
++#define NON_LIN_GAIN_MAX_R                       2
++#define NON_LIN_INCREMENT                        ((AUDIO_MAX_OUTPUT_VOLUME * \
++						   COMPUTE_PRECISION)/\
++						   (NON_LIN_GAIN_MAX_R))
++#define NON_LIN_MUTE                             0
++
++#define DEFAULT_OUTPUT_VOLUME                    70
++#define DEFAULT_OUTPUT_SPK_VOLUME                50
++#define DEFAULT_OUTPUT_HSET_VOLUME               70
++#define DEFAULT_OUTPUT_EAR_VOLUME                60
++#define DEFAULT_SIDETONE_VOLUME                  20
++#define DEFAULT_OUTPUT_CARKIT_VOLUME             50
++
++#ifndef CONFIG_MACH_OMAP3EVM
++#define DEFAULT_INPUT_VOLUME                     60
++#else
++#define DEFAULT_INPUT_VOLUME                     40
++#endif
++
++#define DEFAULT_INPUT_MIC_VOLUME                 80
++
++#ifndef CONFIG_MACH_OMAP3EVM
++#define DEFAULT_INPUT_LINE_VOLUME                80
++#else
++#define DEFAULT_INPUT_LINE_VOLUME                0
++#endif
++
++#define DEFAULT_INPUT_CARKIT_VOLUME              50
++#define AUDIO_RATE_DEFAULT                       8000
++
++/* supports only two sample sizes - 16 and 24 */
++#define AUDIO_SAMPLE_DATA_WIDTH_16               16
++#define AUDIO_SAMPLE_DATA_WIDTH_24               24
++
++ /* The least significant byte gives volume for the left channel and
++  * the next 8 bits for the right channel.
++  */
++#define READ_LEFT_VOLUME(ARG)                    ((ARG) & 0xFF)
++#define READ_RIGHT_VOLUME(ARG)                   (((ARG) & 0xFF00)>>8)
++#define WRITE_LEFT_VOLUME(ARG)                   ((ARG) & 0xFF)
++#define WRITE_RIGHT_VOLUME(ARG)                  (((ARG) & 0xFF)<<8)
++#define WRITE_LR_VOLUME(ARG)                     (WRITE_RIGHT_VOLUME(ARG) | \
++						   WRITE_LEFT_VOLUME(ARG))
++
++#define CODEC_NAME                               "TWL4030"
++#define MIXER_NAME                               "TWL4030 Mixer"
++
++#if defined(CONFIG_ARCH_OMAP243X)
++#define PLATFORM_NAME                            "OMAP243X"
++#elif defined(CONFIG_ARCH_OMAP3430)
++#define PLATFORM_NAME                            "OMAP3430"
++#else
++#error "UnSupported platform"
++#endif
++
++/* Define to set the twl as the master w.r.t McBSP
++ * - remove to make mcbsp master
++ */
++#define TWL_MASTER
++
++/* Select the McBSP for Audio */
++#define AUDIO_MCBSP                              OMAP_MCBSP2
++#define OMAP_AUDIO_NAME			  "omap-audio"
++
++#define AUDIO_APLL_DEFAULT                       APLL_CTL_FREQ_26_0MHZ
++
++struct codec_local_info {
++	/* Global volume control */
++	u16 play_volume;	/* Store the play volume */
++	u16 rec_volume; 	/* Store the record volume */
++	/* Device specific volume control */
++	u16 hset; 		/* Store the hset volume */
++	u16 classd; 		/* Store the classd volume */
++	u16 ear; 		/* Store the ear volume */
++	u16 line; 		/* Store the line volume */
++	u16 mic; 		/* Store the mic volume */
++	u16 aux; 		/* Store aux/FM volume */
++	u16 sidetone; 		/* Store sidetone volume */
++	u16 carkit_out; 	/* Store carkit output gain */
++	u16 carkit_in; 		/* Store carkit input gain */
++	/* Switch flags */
++	u8 handsfree_en;
++	u8 hsmic_en;
++	u8 main_mic_en;
++	u8 sub_mic_en;
++	/* Default volume */
++	int current_input;
++	int current_output;
++	/* Sample rate/channels */
++	long audio_samplerate;
++	u8 current_bitspersample;
++	u8 current_stereomode;
++	/* Source Management */
++	int recsrc; 		/* Current active record sources */
++	int outsrc; 		/* Current active playback sources */
++	int mod_cnt;		/* Usage counter */
++};
++
++struct sample_rate_info_t {
++	u16 rate;
++	u8 apll;
++};
++
++struct codec_mcbsp_settings {
++	omap_mcbsp_dma_transfer_params audio_mcbsp_tx_transfer_params;
++	omap_mcbsp_dma_transfer_params audio_mcbsp_rx_transfer_params;
++	struct omap_mcbsp_cfg_param audio_mcbsp_tx_cfg_param;
++	struct omap_mcbsp_cfg_param audio_mcbsp_rx_cfg_param;
++	struct omap_mcbsp_srg_fsg_cfg audio_mcbsp_srg_fsg_cfg;
++};
++
++extern int mcbsp_interface_acquired;
++
++#define NUMBER_OF_RATES_SUPPORTED (sizeof(valid_sample_rates)/\
++				   sizeof(struct sample_rate_info_t))
++
++/* if we would like to listen to mono sound as stereo on stereo devices
++ */
++#undef MONO_MODE_SOUNDS_STEREO
++
++/* How long to wait for stream to remain active?in Jiffies */
++#define TIMEOUT_WAIT_FOR_ACTIVE       20
++
++/* T2 GPIO for External Mute control - required for pop noise */
++#define TWL4030_AUDIO_EXT_MUT 6
++
++extern struct codec_local_info twl4030_local;
++extern struct codec_mcbsp_settings twl4030_mcbsp_settings;
++
++/**************************** Function Prototypes *****************************/
++
++extern int audio_twl4030_write(u8 address, u8 data);
++extern int audio_twl4030_read(u8 address);
++#ifndef CONFIG_MACH_OMAP3EVM
++extern int twl4030_ext_mut_conf(void);
++extern int twl4030_ext_mut_off(void);
++extern int twl4030_ext_mut_on(void);
++#else
++static inline int twl4030_ext_mut_conf(void)
++	{ return 0; }
++static inline int twl4030_ext_mut_unconf(void)
++	{ return 0; }
++static inline int twl4030_ext_mut_on(void)
++	{ return 0; }
++static inline int twl4030_ext_mut_off(void)
++	{ return 0; }
++#endif
++
++int twl4030_codec_tog_on(void);
++int twl4030_select_source(int flag, int val);
++int twl4030_setvolume(int flag, u8 gain_l, u8 gain_r);
++int twl4030_set_samplerate(long sample_rate);
++int twl4030_bit_set(int bit, int dsp);
++void twl4030_unconfigure(void);
++int twl4030_configure(void);
++void twl4030_mcbsp_dma_cb(u32 ch_status, void *arg);
++int twl4030_stereomode_set(int mode, int dsp);
++
++void snd_omap_init_mixer(void);
++int snd_omap_mixer(struct snd_card_omap_codec *chip);
++int snd_omap_mixer_shutdown(struct snd_card_omap_codec *chip);
++
++#ifdef TONE_GEN
++void generate_tone(void);
++#endif
++
++#ifdef TWL_DUMP_REGISTERS
++void twl4030_dump_registers(void);
++#endif
++
++#endif	/* End of OMAP_AUDIO_TWL4030_H__ */
+diff --git a/sound/arm/omap/omap-alsa.c b/sound/arm/omap/omap-alsa.c
+index f9293cd..f9a30c4 100644
+--- a/sound/arm/omap/omap-alsa.c
++++ b/sound/arm/omap/omap-alsa.c
+@@ -3,6 +3,8 @@
+  *
+  * Alsa Driver for OMAP
+  *
++ * Copyright (C) 2004-2007 Texas Instruments, Inc.
++ *
+  * Copyright (C) 2005 Instituto Nokia de Tecnologia - INdT - Manaus Brazil
+  * Written by Daniel Petrini, David Cohen, Anderson Briglia
+  *            {daniel.petrini, david.cohen, anderson.briglia}@indt.org.br
+@@ -40,6 +42,8 @@
+  * 2005-12-18   Dirk Behme       - Added L/R Channel Interchange fix as proposed
+  *                                 by Ajaya Babu
+  *
++ * 2007-12-17	Misael Lopez	 - Added support for 3430 platform
++ *
+  */
+ 
+ #include <linux/platform_device.h>
+@@ -49,6 +53,7 @@
+ #include <sound/core.h>
+ #include <sound/pcm.h>
+ 
++#include <asm/mach-types.h>
+ #include <asm/arch/omap-alsa.h>
+ #include "omap-alsa-dma.h"
+ 
+@@ -152,7 +157,11 @@ static u_int audio_get_dma_pos(struct audio_stream *s)
+ 	spin_lock_irqsave(&s->dma_lock, flags);
+ 
+ 	/* For the current period let's see where we are */
+-	count = omap_get_dma_src_pos(s->lch[s->dma_q_head]) - dma_start_pos;
++	if (cpu_is_omap2430() || cpu_is_omap34xx())
++		count = frames_to_bytes(runtime, runtime->period_size);
++	else
++		count = omap_get_dma_src_pos(s->lch[s->dma_q_head])
++				- dma_start_pos;
+ 
+ 	spin_unlock_irqrestore(&s->dma_lock, flags);
+ 
+@@ -181,7 +190,6 @@ static void audio_stop_dma(struct audio_stream *s)
+ 
+ 	/* this stops the dma channel and clears the buffer ptrs */
+ 	omap_stop_alsa_sound_dma(s);
+-
+ 	omap_clear_alsa_sound_dma(s);
+ 
+ 	spin_unlock_irqrestore(&s->dma_lock, flags);
+@@ -203,7 +211,8 @@ static void audio_process_dma(struct audio_stream *s)
+ 	if (s->active) {
+ 		dma_size = frames_to_bytes(runtime, runtime->period_size);
+ 		offset = dma_size * s->period;
+-		snd_assert(dma_size <= DMA_BUF_SIZE, return);
++		/* snd_assert(dma_size <= DMA_BUF_SIZE,); */
++
+ 		/*
+ 		 * On omap1510 based devices, we need to call the stop_dma
+ 		 * before calling the start_dma or we will not receive the
+@@ -213,7 +222,8 @@ static void audio_process_dma(struct audio_stream *s)
+ 		if (cpu_is_omap1510())
+ 			omap_stop_alsa_sound_dma(s);
+ 
+-		dma_start_pos = (dma_addr_t)runtime->dma_area + offset;
++		dma_start_pos = (dma_addr_t)__virt_to_phys(runtime->dma_area)
++					+ offset;
+ 		ret = omap_start_alsa_sound_dma(s, dma_start_pos, dma_size);
+ 		if (ret) {
+ 			printk(KERN_ERR "audio_process_dma: cannot"
+@@ -262,6 +272,7 @@ static int snd_omap_alsa_trigger(struct snd_pcm_substream *substream, int cmd)
+ 	int stream_id = substream->pstr->stream;
+ 	struct audio_stream *s = &chip->s[stream_id];
+ 	int err = 0;
++	unsigned long flags;
+ 
+ 	ADEBUG();
+ 	/* note local interrupts are already disabled in the midlevel code */
+@@ -271,11 +282,27 @@ static int snd_omap_alsa_trigger(struct snd_pcm_substream *substream, int cmd)
+ 		/* requested stream startup */
+ 		s->active = 1;
+ 		audio_process_dma(s);
++		/* queue one more to get rid of poping noise */
++		if (cpu_is_omap2430() || cpu_is_omap34xx())
++			audio_process_dma(s);
+ 		break;
+ 	case SNDRV_PCM_TRIGGER_STOP:
+ 		/* requested stream shutdown */
+ 		audio_stop_dma(s);
+ 		break;
++	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
++		spin_lock_irqsave(&s->dma_lock, flags);
++		omap_stop_alsa_sound_dma(s);
++		s->active = 0;
++		spin_unlock_irqrestore(&s->dma_lock, flags);
++		break;
++	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
++		s->active = 1;
++		audio_process_dma(s);
++		/* queue one more to get rid of poping noise */
++		if (cpu_is_omap2430() || cpu_is_omap34xx())
++			audio_process_dma(s);
++		break;
+ 	default:
+ 		err = -EINVAL;
+ 		break;
+@@ -296,6 +323,16 @@ static int snd_omap_alsa_prepare(struct snd_pcm_substream *substream)
+ 	alsa_codec_config->codec_set_samplerate(runtime->rate);
+ 	chip->samplerate = runtime->rate;
+ 
++	if (cpu_is_omap2430() || cpu_is_omap34xx()) {
++		if (runtime->channels == 1) {
++			/* Set Mono_mode */
++			alsa_codec_config->codec_set_stereomode(0x02, 0x01);
++		} else {
++			/* Set Stereo_mode */
++			alsa_codec_config->codec_set_stereomode(0x01, 0x01);
++		}
++	}
++
+ 	s->period = 0;
+ 	s->periods = 0;
+ 
+@@ -337,6 +374,14 @@ static int snd_card_omap_alsa_open(struct snd_pcm_substream *substream)
+ 	if (err < 0)
+ 		return err;
+ 
++	if (cpu_is_omap2430() || cpu_is_omap34xx()) {
++		err = omap_init_alsa_sound_dma(stream_id);
++		if (err) {
++			printk(KERN_ERR " IS init failed!! [%d]\n", err);
++			return err;
++		}
++	}
++
+ 	return 0;
+ }
+ 
+@@ -420,10 +465,12 @@ static int __init snd_card_omap_alsa_pcm(struct snd_card_omap_codec *omap_alsa,
+ 	omap_alsa_audio_init(omap_alsa);
+ 
+ 	/* setup DMA controller */
+-	audio_dma_request(&omap_alsa->s[SNDRV_PCM_STREAM_PLAYBACK],
+-			  callback_omap_alsa_sound_dma);
+-	audio_dma_request(&omap_alsa->s[SNDRV_PCM_STREAM_CAPTURE],
+-			  callback_omap_alsa_sound_dma);
++	if (!(cpu_is_omap2430() || cpu_is_omap34xx())) {
++		audio_dma_request(&omap_alsa->s[SNDRV_PCM_STREAM_PLAYBACK],
++				  callback_omap_alsa_sound_dma);
++		audio_dma_request(&omap_alsa->s[SNDRV_PCM_STREAM_CAPTURE],
++				  callback_omap_alsa_sound_dma);
++	}
+ 
+ 	omap_alsa->pcm = pcm;
+ 
+@@ -483,10 +530,11 @@ void snd_omap_alsa_free(struct snd_card *card)
+ 	 * buffered data.
+ 	 */
+ 	schedule_timeout_interruptible(2);
++	if (cpu_is_omap2430() || cpu_is_omap34xx())
++		return;
+ 
+ 	omap_mcbsp_stop(AUDIO_MCBSP);
+ 	omap_mcbsp_free(AUDIO_MCBSP);
+-
+ 	audio_dma_free(&chip->s[SNDRV_PCM_STREAM_PLAYBACK]);
+ 	audio_dma_free(&chip->s[SNDRV_PCM_STREAM_CAPTURE]);
+ }
+@@ -506,14 +554,16 @@ int snd_omap_alsa_post_probe(struct platform_device *pdev,
+ 
+ 	ADEBUG();
+ 	alsa_codec_config	= config;
+-
++	if (alsa_codec_config && alsa_codec_config->codec_clock_setup)
+ 	alsa_codec_config->codec_clock_setup();
+ 	alsa_codec_config->codec_clock_on();
+ 
++	if (!(cpu_is_omap2430() || cpu_is_omap34xx())) {
+ 	omap_mcbsp_request(AUDIO_MCBSP);
+ 	omap_mcbsp_stop(AUDIO_MCBSP);
+ 	omap_mcbsp_config(AUDIO_MCBSP, alsa_codec_config->mcbsp_regs_alsa);
+ 	omap_mcbsp_start(AUDIO_MCBSP);
++	}
+ 
+ 	if (alsa_codec_config && alsa_codec_config->codec_configure_dev)
+ 		alsa_codec_config->codec_configure_dev();
+diff --git a/sound/arm/omap/omap3-alsa-dma.c b/sound/arm/omap/omap3-alsa-dma.c
+new file mode 100644
+index 0000000..cda19eb
+--- /dev/null
++++ b/sound/arm/omap/omap3-alsa-dma.c
+@@ -0,0 +1,292 @@
++/*
++ * sound/arm/omap/omap3-alsa-dma.c
++ *
++ * Common audio DMA handling for the OMAP processors
++ *
++ * Copyright (C) 20040-2007 Texas Instruments, Inc.
++ *
++ * This package is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * THIS PACKAGE IS PROVIDED ``AS IS'' AND WITHOUT ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED
++ * WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR A PARTICULAR PURPOSE.
++ *
++ * Contibutors:
++ * 	Jian Zhang
++ *	Hari Nagalla
++ *	Misael Lopez Cruz
++ */
++
++#include <linux/io.h>
++#include <asm/arch/dma.h>
++#include <asm/arch/mcbsp.h>
++
++#include "omap-alsa-dma.h"
++#include "omap-alsa-twl4030.h"
++
++int twl4030_conf_data_interface(void)
++{
++	int ret = 0;
++	int line = 0;
++	int frame_length1 = OMAP_MCBSP_FRAMELEN_N(2);
++	int word_length1 = OMAP_MCBSP_WORD_32;
++	int frame_polarity = OMAP_MCBSP_FS_ACTIVE_LOW;
++	int skip_alt = OMAP_MCBSP_SKIP_NONE;
++
++	/* Check sample width */
++	if (twl4030_local.current_bitspersample ==
++					AUDIO_SAMPLE_DATA_WIDTH_16) {
++		if (twl4030_local.current_stereomode == STEREO_MODE) {
++			frame_polarity = OMAP_MCBSP_FS_ACTIVE_HIGH;
++		} else {
++			/* Mono Mode */
++			/* use 16 bits dma even though 32 bit width */
++			word_length1 = OMAP_MCBSP_WORD_16;
++		}
++		/* 1 word */
++		frame_length1 = OMAP_MCBSP_FRAMELEN_N(1);
++
++	} else if (twl4030_local.current_bitspersample ==
++					AUDIO_SAMPLE_DATA_WIDTH_24) {
++		if (twl4030_local.current_stereomode == MONO_MODE) {
++			/* Mono Mode */
++			/* use 32 bits dma and do doubleindex */
++			skip_alt = OMAP_MCBSP_SKIP_SECOND;
++		}
++		/* 2 words */
++		frame_length1 = OMAP_MCBSP_FRAMELEN_N(2);
++	} else {
++		printk(KERN_ERR "Unknown sample width %d\n",
++			twl4030_local.current_bitspersample);
++		return -EPERM;
++	}
++
++	/* Reset the McBSP registers so that we can
++	 * configure it
++	 */
++	ret = omap2_mcbsp_reset(AUDIO_MCBSP);
++	if (unlikely(ret)) {
++		printk(KERN_ERR "conf_data Reset for MCBSP Failed[%d]\n", ret);
++		/* Don't care about result */
++		return ret;
++	}
++
++	/* Setup the new params */
++	twl4030_mcbsp_settings.audio_mcbsp_tx_cfg_param.
++						frame_length1 = frame_length1;
++	twl4030_mcbsp_settings.audio_mcbsp_tx_cfg_param.
++						word_length1 = word_length1;
++	twl4030_mcbsp_settings.audio_mcbsp_tx_cfg_param.
++						fs_polarity = frame_polarity;
++	twl4030_mcbsp_settings.audio_mcbsp_tx_transfer_params.
++						skip_alt = skip_alt;
++	twl4030_mcbsp_settings.audio_mcbsp_tx_transfer_params.
++						word_length1 = word_length1;
++
++	twl4030_mcbsp_settings.audio_mcbsp_rx_cfg_param.
++						frame_length1 = frame_length1;
++	twl4030_mcbsp_settings.audio_mcbsp_rx_cfg_param.
++						word_length1 = word_length1;
++	twl4030_mcbsp_settings.audio_mcbsp_rx_cfg_param.
++						fs_polarity = frame_polarity;
++	twl4030_mcbsp_settings.audio_mcbsp_rx_transfer_params.
++						skip_alt = skip_alt;
++	twl4030_mcbsp_settings.audio_mcbsp_rx_transfer_params.
++						word_length1 = word_length1;
++
++#ifdef TWL_MASTER
++	twl4030_mcbsp_settings.audio_mcbsp_srg_fsg_cfg.period = 0;
++	twl4030_mcbsp_settings.audio_mcbsp_srg_fsg_cfg.pulse_width = 0;
++	twl4030_mcbsp_settings.audio_mcbsp_srg_fsg_cfg.polarity = 0;
++#else
++	twl4030_mcbsp_settings.audio_mcbsp_srg_fsg_cfg.period =
++				twl4030_local.current_bitspersample * 2 - 1;
++	twl4030_mcbsp_settings.audio_mcbsp_srg_fsg_cfg.pulse_width =
++				twl4030_local.current_bitspersample - 1;
++	twl4030_mcbsp_settings.audio_mcbsp_srg_fsg_cfg.polarity = 1;
++#endif
++	twl4030_mcbsp_settings.audio_mcbsp_srg_fsg_cfg.sample_rate =
++				twl4030_local.audio_samplerate;
++	twl4030_mcbsp_settings.audio_mcbsp_srg_fsg_cfg.bits_per_sample =
++				twl4030_local.current_bitspersample;
++
++	ret = omap2_mcbsp_params_cfg(AUDIO_MCBSP,
++#ifdef TWL_MASTER
++			OMAP_MCBSP_SLAVE,
++#else
++			OMAP_MCBSP_MASTER,
++#endif
++			&(twl4030_mcbsp_settings.audio_mcbsp_rx_cfg_param),
++			&(twl4030_mcbsp_settings.audio_mcbsp_tx_cfg_param),
++			&(twl4030_mcbsp_settings.audio_mcbsp_srg_fsg_cfg));
++	if (unlikely(ret != 0)) {
++		line = __LINE__;
++		goto mcbsp_config_exit;
++	}
++	ret = omap2_mcbsp_dma_recv_params(AUDIO_MCBSP,
++		&(twl4030_mcbsp_settings.audio_mcbsp_rx_transfer_params));
++	if (unlikely(ret != 0)) {
++		line = __LINE__;
++		goto mcbsp_config_exit;
++	}
++	ret = omap2_mcbsp_dma_recv_params(AUDIO_MCBSP,
++		&(twl4030_mcbsp_settings.audio_mcbsp_tx_transfer_params));
++	if (unlikely(ret != 0)) {
++		line = __LINE__;
++		goto mcbsp_config_exit;
++	}
++
++mcbsp_config_exit:
++	if (unlikely(ret != 0))
++		printk(KERN_ERR
++		       "Unable to configure Mcbsp ret=%d @ line %d.", ret,
++		       line);
++	return ret;
++}
++EXPORT_SYMBOL(twl4030_conf_data_interface);
++
++
++void omap_clear_alsa_sound_dma(struct audio_stream *s)
++{
++	/* Nothing to do for 3430 platform  */
++}
++EXPORT_SYMBOL(omap_clear_alsa_sound_dma);
++
++int omap_request_alsa_sound_dma(int device_id, const char *device_name,
++				void *data, int **channels)
++{
++	/* Nothing to do for 3430 platform */
++	return 0;
++
++}
++EXPORT_SYMBOL(omap_request_alsa_sound_dma);
++
++int omap_free_alsa_sound_dma(void *data, int **channels)
++{
++	/* Nothing to do for 3430 platform */
++	return 0;
++}
++EXPORT_SYMBOL(omap_free_alsa_sound_dma);
++
++int omap_init_alsa_sound_dma(int mode)
++{
++	int ret = 0;
++
++	if (mcbsp_interface_acquired > 0) {
++		if (mode == SNDRV_PCM_STREAM_CAPTURE) {
++			ret =
++			    omap2_mcbsp_dma_recv_params(AUDIO_MCBSP,
++					&(twl4030_mcbsp_settings.
++					audio_mcbsp_rx_transfer_params));
++			if (ret < 0) {
++				printk(KERN_ERR "RECV params failed");
++				goto transfer_exit;
++			}
++		} else {
++			ret =
++			    omap2_mcbsp_dma_trans_params(AUDIO_MCBSP,
++					&(twl4030_mcbsp_settings.
++					audio_mcbsp_tx_transfer_params));
++			if (ret < 0) {
++				printk(KERN_ERR "TRANS params failed");
++				goto transfer_exit;
++			}
++		}
++	}
++transfer_exit:
++	return ret;
++}
++EXPORT_SYMBOL(omap_init_alsa_sound_dma);
++
++/* Start DMA
++ * Do the initial set of work to initialize all the channels as required.
++ * We shall then initate a transfer
++ */
++int omap_start_alsa_sound_dma(struct audio_stream *s,
++				dma_addr_t dma_ptr, u_int dma_size)
++{
++	int mode = s->stream_id;
++	int ret = 0;
++
++#ifdef TWL_DUMP_REGISTERS_MCBSP
++	printk(KERN_INFO "TRANSFER");
++	omap_mcbsp_dump_reg(AUDIO_MCBSP);
++#endif
++	if (mcbsp_interface_acquired > 0) {
++		if (mode == SNDRV_PCM_STREAM_CAPTURE) {
++			/* Capture Path to be implemented */
++			ret = omap2_mcbsp_receive_data(AUDIO_MCBSP, (void *)s,
++						dma_ptr, dma_size);
++		} else {
++			ret = omap2_mcbsp_send_data(AUDIO_MCBSP, (void *)s,
++						dma_ptr, dma_size);
++		}
++	}
++
++	return ret;
++}
++EXPORT_SYMBOL(omap_start_alsa_sound_dma);
++
++int omap_stop_alsa_sound_dma(struct audio_stream *s)
++{
++	int mode = s->stream_id;
++	int ret = 0;
++
++	if (mcbsp_interface_acquired > 0) {
++		if (mode == SNDRV_PCM_STREAM_CAPTURE)
++			ret = omap2_mcbsp_stop_datarx(AUDIO_MCBSP);
++		else
++			ret = omap2_mcbsp_stop_datatx(AUDIO_MCBSP);
++	}
++
++	return ret;
++}
++EXPORT_SYMBOL(omap_stop_alsa_sound_dma);
++
++static inline int element_size(int mcbsp_wordlen)
++{
++	if (mcbsp_wordlen == OMAP_MCBSP_WORD_32)
++		return 4;
++	if (mcbsp_wordlen == OMAP_MCBSP_WORD_16)
++		return 2;
++	/* We don't allow any other word lengths */
++	return -1;
++}
++
++int omap_transfer_posn_alsa_sound_dma(struct audio_stream *s)
++{
++	int mode = s->stream_id;
++	int ret = 0;
++	int fi, ei;
++
++	/* We always ask only one frame to transmit/recieve,
++	 * variant is the element num
++	 */
++	if (mcbsp_interface_acquired > 0) {
++		if (mode == SNDRV_PCM_STREAM_CAPTURE) {
++			ret = omap2_mcbsp_receiver_index(AUDIO_MCBSP,
++							&ei, &fi);
++			ret = ei * element_size(twl4030_mcbsp_settings.
++				audio_mcbsp_rx_transfer_params.word_length1);
++		} else {
++			ret = omap2_mcbsp_transmitter_index(AUDIO_MCBSP,
++							&ei, &fi);
++			ret = ei * element_size(twl4030_mcbsp_settings.
++				audio_mcbsp_tx_transfer_params.word_length1);
++		}
++	}
++
++	if (ret < 0)
++		printk(KERN_ERR
++		       "twl4030_transfer_posn: Unable to find index of "
++		       "transfer\n");
++	return ret;
++}
++EXPORT_SYMBOL(omap_transfer_posn_alsa_sound_dma);
++
++MODULE_AUTHOR("Texas Instruments");
++MODULE_DESCRIPTION("Common DMA handling for Audio driver on OMAP3 processors");
++MODULE_LICENSE("GPL");
++
+-- 
+1.5.6
+
