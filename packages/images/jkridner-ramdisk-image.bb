@@ -19,6 +19,9 @@ ARAGO_EXTRA_INSTALL = "\
     e2fsprogs-e2fsck \
     e2fsprogs-mke2fs \
     dosfstools \
+    util-linux-fdisk \
+    util-linux-sfdisk \
+    dropbear \
     "
 
 # Disable this due to distribution restrictions
