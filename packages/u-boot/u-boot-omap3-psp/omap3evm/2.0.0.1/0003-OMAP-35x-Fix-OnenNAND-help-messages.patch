@@ -1,0 +1,30 @@
+From 4d2fd3656a8ee17e8f4bae77f495a46f858e9fb6 Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Fri, 12 Sep 2008 13:45:56 +0530
+Subject: [PATCH 3/6] OMAP 35x : Fix OnenNAND help messages.
+
+---
+ common/cmd_onenand.c |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/common/cmd_onenand.c b/common/cmd_onenand.c
+index 3285707..38797f5 100644
+--- a/common/cmd_onenand.c
++++ b/common/cmd_onenand.c
+@@ -218,11 +218,11 @@ U_BOOT_CMD(
+ 	"       ---ofs and len(not for oob) have to be page aligned\n"
+ 	"onenand write addr ofs len - write data at ofs with len from addr\n"
+ 	"       ---ofs and len have to be page aligned\n"
+-	"onenand erase saddr eaddr - erase block start addr to end addr\n"
++	"onenand erase sofs eofs - erase block start ofs to end ofs\n"
+ 	"onenand erase block sblk-endblk - erase blocks sblk to endblk\n"
+ 	"       ---erase command does not erase bad blocks\n"
+ 	"onenand scrub block start-end - erase block from start to end\n"
+-	"onenand scrub saddr eaddr - erase blocks start addr to end addr\n"
++	"onenand scrub sofs eofs - erase blocks start ofs to end ofs\n"
+ 	"       ---CAUTION :scrub command erases bad blocks also\n"
+ 	"onenand block[.oob] addr block [page] [len]\n"
+ 	"       ---read data with (block [, page]) to addr\n"
+-- 
+1.5.6
+

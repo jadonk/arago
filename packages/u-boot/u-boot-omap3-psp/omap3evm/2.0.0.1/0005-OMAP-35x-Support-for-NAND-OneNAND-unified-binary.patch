@@ -1,0 +1,921 @@
+From fa5cddb4adf7feca2d7a5d55975e823765e05cea Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Fri, 12 Sep 2008 13:49:08 +0530
+Subject: [PATCH 5/6] OMAP 35x : Support for NAND/OneNAND unified binary.
+
+---
+ board/omap3/beagle/beagle.c    |    1 -
+ board/omap3/evm/evm.c          |    1 -
+ board/omap3/overo/overo.c      |    1 -
+ common/cmd_nvedit.c            |    5 ++
+ common/env_common.c            |   12 ++-
+ common/env_nand.c              |   36 ++++++++++-
+ common/env_onenand.c           |   28 ++++++++-
+ cpu/omap3/board.c              |   16 +++++
+ cpu/omap3/mem.c                |  114 +++++++++++++++++++-------------
+ cpu/omap3/nand.c               |    3 +-
+ cpu/omap3/sys_info.c           |   13 +++-
+ drivers/mtd/nand/nand_base.c   |  144 +++++++++++++++++++++++++++++++++++++++-
+ include/common.h               |   11 +++-
+ include/configs/omap3_beagle.h |    3 +-
+ include/configs/omap3_evm.h    |    3 +-
+ include/configs/omap3_overo.h  |    3 +-
+ include/environment.h          |    3 +-
+ lib_arm/board.c                |   20 ++++++
+ 18 files changed, 345 insertions(+), 72 deletions(-)
+
+diff --git a/board/omap3/beagle/beagle.c b/board/omap3/beagle/beagle.c
+index b4d3028..25f1116 100644
+--- a/board/omap3/beagle/beagle.c
++++ b/board/omap3/beagle/beagle.c
+@@ -51,7 +51,6 @@ int board_init(void)
+ {
+ 	DECLARE_GLOBAL_DATA_PTR;
+ 
+-	gpmc_init(); /* in SRAM or SDRAM, finish GPMC */
+ 	/* board id for Linux */
+ 	gd->bd->bi_arch_number = MACH_TYPE_OMAP3_BEAGLE;
+ 	/* boot param addr */
+diff --git a/board/omap3/evm/evm.c b/board/omap3/evm/evm.c
+index 88f249d..5f1930a 100644
+--- a/board/omap3/evm/evm.c
++++ b/board/omap3/evm/evm.c
+@@ -52,7 +52,6 @@ int board_init(void)
+ {
+ 	DECLARE_GLOBAL_DATA_PTR;
+ 
+-	gpmc_init(); /* in SRAM or SDRAM, finish GPMC */
+ 	/* board id for Linux */
+ 	gd->bd->bi_arch_number = MACH_TYPE_OMAP3EVM;
+ 	/* boot param addr */
+diff --git a/board/omap3/overo/overo.c b/board/omap3/overo/overo.c
+index fc3b07a..8dca57b 100644
+--- a/board/omap3/overo/overo.c
++++ b/board/omap3/overo/overo.c
+@@ -50,7 +50,6 @@ int board_init(void)
+ {
+ 	DECLARE_GLOBAL_DATA_PTR;
+ 
+-	gpmc_init(); /* in SRAM or SDRAM, finish GPMC */
+ 	/* board id for Linux */
+ 	gd->bd->bi_arch_number = MACH_TYPE_OVERO;
+ 	/* boot param addr */
+diff --git a/common/cmd_nvedit.c b/common/cmd_nvedit.c
+index 7089706..d4a5d04 100644
+--- a/common/cmd_nvedit.c
++++ b/common/cmd_nvedit.c
+@@ -59,6 +59,7 @@ DECLARE_GLOBAL_DATA_PTR;
+     !defined(CFG_ENV_IS_IN_NAND)	&& \
+     !defined(CFG_ENV_IS_IN_ONENAND)	&& \
+     !defined(CFG_ENV_IS_IN_SPI_FLASH)	&& \
++    !defined(CFG_ENV_IS_IN_SEL_RUN)	&& \
+     !defined(CFG_ENV_IS_NOWHERE)
+ # error Define one of CFG_ENV_IS_IN_{NVRAM|EEPROM|FLASH|DATAFLASH|ONENAND|SPI_FLASH|NOWHERE}
+ #endif
+@@ -66,6 +67,10 @@ DECLARE_GLOBAL_DATA_PTR;
+ #define XMK_STR(x)	#x
+ #define MK_STR(x)	XMK_STR(x)
+ 
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++extern saveenv_p saveenv;
++#endif
++
+ /************************************************************************
+ ************************************************************************/
+ 
+diff --git a/common/env_common.c b/common/env_common.c
+index d51c211..b1696bf 100644
+--- a/common/env_common.c
++++ b/common/env_common.c
+@@ -46,8 +46,13 @@ DECLARE_GLOBAL_DATA_PTR;
+ 
+ extern env_t *env_ptr;
+ 
+-extern void env_relocate_spec (void);
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++extern env_get_char_spec_p env_get_char_spec;
++extern env_relocate_spec_p env_relocate_spec;
++#else
+ extern uchar env_get_char_spec(int);
++extern void env_relocate_spec(void);
++#endif
+ 
+ static uchar env_get_char_init (int index);
+ 
+@@ -134,7 +139,8 @@ uchar default_environment[] = {
+ };
+ 
+ #if defined(CFG_ENV_IS_IN_NAND)		/* Environment is in Nand Flash */ \
+-	|| defined(CFG_ENV_IS_IN_SPI_FLASH)
++	|| defined(CFG_ENV_IS_IN_SPI_FLASH) || \
++	(defined(CONFIG_CMD_NAND) && defined(CFG_ENV_IS_IN_SEL_RUN))
+ int default_environment_size = sizeof(default_environment);
+ #endif
+ 
+@@ -191,7 +197,6 @@ uchar env_get_char (int index)
+ 		c = env_get_char_memory(index);
+ 	else
+ 		c = env_get_char_init(index);
+-
+ 	return (c);
+ }
+ 
+@@ -258,7 +263,6 @@ void env_relocate (void)
+ 		env_relocate_spec ();
+ 	}
+ 	gd->env_addr = (ulong)&(env_ptr->data);
+-
+ #ifdef CONFIG_AMIGAONEG3SE
+ 	disable_nvram();
+ #endif
+diff --git a/common/env_nand.c b/common/env_nand.c
+index a8f0de7..4561202 100644
+--- a/common/env_nand.c
++++ b/common/env_nand.c
+@@ -34,7 +34,9 @@
+ 
+ #include <common.h>
+ 
+-#if defined(CFG_ENV_IS_IN_NAND) /* Environment is in Nand Flash */
++/* Environment is in Nand Flash */
++#if defined(CFG_ENV_IS_IN_NAND) || (defined(CONFIG_CMD_NAND) && \
++					defined(CFG_ENV_IS_IN_SEL_RUN))
+ 
+ #include <command.h>
+ #include <environment.h>
+@@ -68,12 +70,18 @@ int nand_legacy_rw (struct nand_chip* nand, int cmd,
+ extern uchar default_environment[];
+ extern int default_environment_size;
+ 
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++char *nand_env_name_spec = "NAND";
++#else
+ char * env_name_spec = "NAND";
+-
++#endif
+ 
+ #ifdef ENV_IS_EMBEDDED
+ extern uchar environment[];
+ env_t *env_ptr = (env_t *)(&environment[0]);
++#elif defined(CFG_ENV_IS_IN_SEL_RUN)
++env_t *nand_env_ptr;
++extern env_t *env_ptr;
+ #else /* ! ENV_IS_EMBEDDED */
+ env_t *env_ptr = 0;
+ #endif /* ENV_IS_EMBEDDED */
+@@ -86,7 +94,11 @@ static void use_default(void);
+ 
+ DECLARE_GLOBAL_DATA_PTR;
+ 
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++uchar nand_env_get_char_spec(int index)
++#else
+ uchar env_get_char_spec (int index)
++#endif
+ {
+ 	return ( *((uchar *)(gd->env_addr + index)) );
+ }
+@@ -103,7 +115,11 @@ uchar env_get_char_spec (int index)
+  * the SPL loads not only the U-Boot image from NAND but also the
+  * environment.
+  */
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++int nand_env_init(void)
++#else
+ int env_init(void)
++#endif
+ {
+ #if defined(ENV_IS_EMBEDDED)
+ 	size_t total;
+@@ -184,7 +200,11 @@ int writeenv(size_t offset, u_char *buf)
+ 	return 0;
+ }
+ #ifdef CFG_ENV_OFFSET_REDUND
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++int nand_saveenv(void)
++#else
+ int saveenv(void)
++#endif
+ {
+ 	size_t total;
+ 	int ret = 0;
+@@ -227,7 +247,11 @@ int saveenv(void)
+ 	return ret;
+ }
+ #else /* ! CFG_ENV_OFFSET_REDUND */
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++int nand_saveenv(void)
++#else
+ int saveenv(void)
++#endif
+ {
+ 	size_t total;
+ 	int ret = 0;
+@@ -287,7 +311,11 @@ int readenv (size_t offset, u_char * buf)
+ }
+ 
+ #ifdef CFG_ENV_OFFSET_REDUND
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++void nand_env_relocate_spec(void)
++#else
+ void env_relocate_spec (void)
++#endif
+ {
+ #if !defined(ENV_IS_EMBEDDED)
+ 	size_t total;
+@@ -344,7 +372,11 @@ void env_relocate_spec (void)
+  * The legacy NAND code saved the environment in the first NAND device i.e.,
+  * nand_dev_desc + 0. This is also the behaviour using the new NAND code.
+  */
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++void nand_env_relocate_spec(void)
++#else
+ void env_relocate_spec (void)
++#endif
+ {
+ #if !defined(ENV_IS_EMBEDDED)
+ 	int ret;
+diff --git a/common/env_onenand.c b/common/env_onenand.c
+index d5c907c..d776955 100644
+--- a/common/env_onenand.c
++++ b/common/env_onenand.c
+@@ -23,7 +23,9 @@
+ 
+ #include <common.h>
+ 
+-#if defined(CFG_ENV_IS_IN_ONENAND)	/* Environment is in OneNAND */
++/* Environment is in OneNAND */
++#if defined(CFG_ENV_IS_IN_ONENAND) || (defined(CONFIG_CMD_ONENAND) && \
++					defined(CFG_ENV_IS_IN_SEL_RUN))
+ 
+ #include <command.h>
+ #include <environment.h>
+@@ -42,11 +44,19 @@ extern uchar default_environment[];
+ 
+ #define ONENAND_ENV_SIZE(mtd)	(mtd.writesize - ENV_HEADER_SIZE)
+ 
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++char *onenand_env_name_spec = "OneNAND";
++#else
+ char *env_name_spec = "OneNAND";
++#endif
+ 
+ #ifdef ENV_IS_EMBEDDED
+ extern uchar environment[];
+ env_t *env_ptr = (env_t *) (&environment[0]);
++#elif defined(CFG_ENV_IS_IN_SEL_RUN)
++static unsigned char onenand_env[MAX_ONENAND_PAGESIZE];
++env_t *onenand_env_ptr = (env_t *)&onenand_env[0];
++extern env_t *env_ptr;
+ #else /* ! ENV_IS_EMBEDDED */
+ static unsigned char onenand_env[MAX_ONENAND_PAGESIZE];
+ env_t *env_ptr = (env_t *) onenand_env;
+@@ -54,12 +64,20 @@ env_t *env_ptr = (env_t *) onenand_env;
+ 
+ DECLARE_GLOBAL_DATA_PTR;
+ 
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++uchar onenand_env_get_char_spec(int index)
++#else
+ uchar env_get_char_spec(int index)
++#endif
+ {
+ 	return (*((uchar *) (gd->env_addr + index)));
+ }
+ 
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++void onenand_env_relocate_spec(void)
++#else
+ void env_relocate_spec(void)
++#endif
+ {
+ 	unsigned long env_addr;
+ 	int use_default = 0;
+@@ -90,7 +108,11 @@ void env_relocate_spec(void)
+ 	gd->env_valid = 1;
+ }
+ 
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++int onenand_saveenv(void)
++#else
+ int saveenv(void)
++#endif
+ {
+ 	unsigned long env_addr = CFG_ENV_ADDR;
+ 	struct erase_info instr = {
+@@ -118,7 +140,11 @@ int saveenv(void)
+ 	return 0;
+ }
+ 
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++int onenand_env_init(void)
++#else
+ int env_init(void)
++#endif
+ {
+ 	/* use default */
+ 	gd->env_addr = (ulong) & default_environment[0];
+diff --git a/cpu/omap3/board.c b/cpu/omap3/board.c
+index 0ca4128..1dea66f 100644
+--- a/cpu/omap3/board.c
++++ b/cpu/omap3/board.c
+@@ -310,6 +310,20 @@ void nand_init(void)
+ #endif
+ 
+ /******************************************************************************
++ * Routine: print_board_info
++ * Description: Displays cpu and memory information for the board
++ *****************************************************************************/
++void print_board_info(void)
++{
++	u32 mtype, btype;
++
++	btype = get_board_type();
++	mtype = get_mem_type();
++
++	display_board_info(btype);
++}
++
++/******************************************************************************
+  * Dummy function to handle errors for EABI incompatibility
+  *****************************************************************************/
+ void raise(void)
+@@ -322,3 +336,5 @@ void raise(void)
+ void abort(void)
+ {
+ }
++
++
+diff --git a/cpu/omap3/mem.c b/cpu/omap3/mem.c
+index 8ad4b33..7191f60 100644
+--- a/cpu/omap3/mem.c
++++ b/cpu/omap3/mem.c
+@@ -26,11 +26,13 @@
+  */
+ 
+ #include <common.h>
++#include <environment.h>
+ #include <asm/io.h>
+ #include <asm/arch/bits.h>
+ #include <asm/arch/mem.h>
+ #include <asm/arch/sys_proto.h>
+ #include <command.h>
++#include <nand.h>
+ 
+ /* Only One NAND allowed on board at a time.
+  * The GPMC CS Base for the same
+@@ -40,33 +42,42 @@ unsigned int boot_flash_off;
+ unsigned int boot_flash_sec;
+ unsigned int boot_flash_type;
+ volatile unsigned int boot_flash_env_addr;
++char *env_name_spec;
++env_t *env_ptr;
++extern char *nand_env_name_spec;
++extern char *onenand_env_name_spec;
++extern env_t *nand_env_ptr;
++extern env_t *onenand_env_ptr;
++
++/* if 1 = NAND, 2 = ONENAND */
++unsigned int env_in_storage;
++extern void onenand_init(void);
++extern int nand_scan_ident(struct mtd_info *mtd, int maxchips);
+ 
+ /* help common/env_flash.c */
+-#ifdef ENV_IS_VARIABLE
+-
+-uchar(*boot_env_get_char_spec) (int index);
+-int (*boot_env_init) (void);
+-int (*boot_saveenv) (void);
+-void (*boot_env_relocate_spec) (void);
+-
+-/* 16 bit NAND */
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++env_get_char_spec_p env_get_char_spec;
++env_init_p env_init;
++saveenv_p saveenv;
++env_relocate_spec_p env_relocate_spec;
++extern uchar nand_env_get_char_spec(int index);
++extern int nand_env_init(void);
++extern int nand_saveenv(void);
++extern void nand_env_relocate_spec(void);
++extern uchar onenand_env_get_char_spec(int index);
++extern int onenand_env_init(void);
++extern int onenand_saveenv(void);
++extern void onenand_env_relocate_spec(void);
++#else
+ uchar env_get_char_spec(int index);
+ int env_init(void);
+ int saveenv(void);
+ void env_relocate_spec(void);
+-extern char *env_name_spec;
+-
+-#if defined(CONFIG_CMD_NAND)
+-u8 is_nand;
+ #endif
+ 
+-#if defined(CONFIG_CMD_ONENAND)
+-u8 is_onenand;
+-#endif
+-
+-#endif /* ENV_IS_VARIABLE */
+-
+ #if defined(CONFIG_CMD_NAND)
++u8 is_nand;
++extern nand_info_t nand_info[CFG_MAX_NAND_DEVICE];
+ static u32 gpmc_m_nand[GPMC_MAX_REG] = {
+ 	M_NAND_GPMC_CONFIG1,
+ 	M_NAND_GPMC_CONFIG2,
+@@ -79,6 +90,8 @@ unsigned int nand_cs_base;
+ #endif
+ 
+ #if defined(CONFIG_CMD_ONENAND)
++u8 is_onenand;
++extern struct mtd_info onenand_mtd;
+ static u32 gpmc_onenand[GPMC_MAX_REG] = {
+ 	ONENAND_GPMC_CONFIG1,
+ 	ONENAND_GPMC_CONFIG2,
+@@ -223,6 +236,7 @@ void gpmc_init(void)
+ 	u32 mux = 0, mwidth;
+ 	u32 *gpmc_config = NULL;
+ 	u32 gpmc_base = 0;
++	u32 gpmc_index = 0;
+ 	u32 base = 0;
+ 	u32 size = 0;
+ 	u32 f_off = CFG_MONITOR_LEN;
+@@ -248,40 +262,46 @@ void gpmc_init(void)
+ 
+ #if defined(CONFIG_CMD_NAND)    /* CS 0 */
+ 	gpmc_config = gpmc_m_nand;
+-#if defined(CFG_ENV_IS_IN_NAND)
+-	gpmc_base = GPMC_CONFIG_CS0 + (0 * GPMC_CONFIG_WIDTH);
+-#else
+-	gpmc_base = GPMC_CONFIG_CS0 + (1 * GPMC_CONFIG_WIDTH);
+-#endif
++	gpmc_base = GPMC_CONFIG_CS0 + (gpmc_index * GPMC_CONFIG_WIDTH);
+ 	base = PISMO1_NAND_BASE;
+ 	size = PISMO1_NAND_SIZE;
+ 	enable_gpmc_config(gpmc_config, gpmc_base, base, size);
+-	is_nand = 1;
+-	nand_cs_base = gpmc_base;
+-#if defined(CFG_ENV_IS_IN_NAND)
+-	f_off = SMNAND_ENV_OFFSET;
+-	f_sec = SZ_128K;
+-	/* env setup */
+-	boot_flash_base = base;
+-	boot_flash_off = f_off;
+-	boot_flash_sec = f_sec;
+-	boot_flash_env_addr = f_off;
+-#endif
++	/* NAND and/or ONENAND is to be scanned */
++	is_nand = 0;
++	nand_init();
++	if (nand_info[0].size) {
++		is_nand = 1;
++		nand_cs_base = gpmc_base;
++		f_off = SMNAND_ENV_OFFSET;
++		f_sec = SZ_128K;
++		/* env setup */
++		boot_flash_base = base;
++		boot_flash_off = f_off;
++		boot_flash_sec = f_sec;
++		boot_flash_env_addr = f_off;
++
++		env_name_spec = nand_env_name_spec;
++		env_ptr = nand_env_ptr;
++		env_get_char_spec = nand_env_get_char_spec;
++		env_init = nand_env_init;
++		saveenv = nand_saveenv;
++		env_relocate_spec = nand_env_relocate_spec;
++		gpmc_index++;
++	}
+ #endif
+ 
+ #if defined(CONFIG_CMD_ONENAND)
+ 	gpmc_config = gpmc_onenand;
+-#if defined(CFG_ENV_IS_IN_ONENAND)
+-	gpmc_base = GPMC_CONFIG_CS0 + (0 * GPMC_CONFIG_WIDTH);
+-#else
+-	gpmc_base = GPMC_CONFIG_CS0 + (1 * GPMC_CONFIG_WIDTH);
+-#endif
++	gpmc_base = GPMC_CONFIG_CS0 + (gpmc_index * GPMC_CONFIG_WIDTH);
+ 	base = PISMO1_ONEN_BASE;
+ 	size = PISMO1_ONEN_SIZE;
+ 	enable_gpmc_config(gpmc_config, gpmc_base, base, size);
++	/* NAND and/or ONENAND is to be scanned */
++	is_onenand = 0;
++	onenand_init();
++	if (onenand_mtd.size) {
+ 	is_onenand = 1;
+ 	onenand_cs_base = gpmc_base;
+-#if defined(CFG_ENV_IS_IN_ONENAND)
+ 	f_off = ONENAND_ENV_OFFSET;
+ 	f_sec = SZ_128K;
+ 	/* env setup */
+@@ -289,13 +309,13 @@ void gpmc_init(void)
+ 	boot_flash_off = f_off;
+ 	boot_flash_sec = f_sec;
+ 	boot_flash_env_addr = f_off;
+-#endif
++	env_name_spec = onenand_env_name_spec;
++	env_ptr = onenand_env_ptr;
++	env_get_char_spec = onenand_env_get_char_spec;
++	env_init = onenand_env_init;
++	saveenv = onenand_saveenv;
++	env_relocate_spec = onenand_env_relocate_spec;
++	}
+ #endif
+ 
+-#ifdef ENV_IS_VARIABLE
+-	boot_env_get_char_spec = env_get_char_spec;
+-	boot_env_init = env_init;
+-	boot_saveenv = saveenv;
+-	boot_env_relocate_spec = env_relocate_spec;
+-#endif
+ }
+diff --git a/cpu/omap3/nand.c b/cpu/omap3/nand.c
+index d140ae0..be5a1c8 100644
+--- a/cpu/omap3/nand.c
++++ b/cpu/omap3/nand.c
+@@ -32,6 +32,7 @@
+ 
+ unsigned char cs;
+ volatile unsigned long gpmc_cs_base_add;
++extern int nand_switch_ecc(struct mtd_info *mtd);
+ 
+ #define GPMC_BUF_EMPTY 0
+ #define GPMC_BUF_FULL 1
+@@ -313,9 +314,9 @@ void omap_nand_switch_ecc(struct mtd_info *mtd, int hardware)
+ 		nand->ecc.hwctl = omap_enable_hwecc;
+ 		nand->ecc.correct = omap_correct_data;
+ 		nand->ecc.calculate = omap_calculate_ecc;
+-
+ 		omap_hwecc_init(nand);
+ 	}
++	nand_switch_ecc(mtd);
+ 
+ 	if (nand->options & NAND_BUSWIDTH_16) {
+ 		mtd->oobavail = mtd->oobsize - (nand->ecc.layout->eccbytes + 2);
+diff --git a/cpu/omap3/sys_info.c b/cpu/omap3/sys_info.c
+index dde57a9..8985253 100644
+--- a/cpu/omap3/sys_info.c
++++ b/cpu/omap3/sys_info.c
+@@ -34,16 +34,21 @@
+ 
+ extern omap3_sysinfo sysinfo;
+ 
++#if defined(CONFIG_CMD_ONENAND)
++extern u8 is_onenand;
++#endif
++
+ /**************************************************************************
+  * get_gpmc0_type()
+  ***************************************************************************/
+ u32 get_gpmc0_type(void)
+ {
+-#if defined(CFG_ENV_IS_IN_ONENAND)
+-	return 1; /* OneNAND */
+-#else
+-	return 2; /* NAND */
++#if defined(CONFIG_CMD_ONENAND)
++	if (is_onenand)
++		return 1; /* OneNAND */
++	else
+ #endif
++		return 2; /* NAND */
+ }
+ 
+ /****************************************************
+diff --git a/drivers/mtd/nand/nand_base.c b/drivers/mtd/nand/nand_base.c
+index 0913bb8..7658a86 100644
+--- a/drivers/mtd/nand/nand_base.c
++++ b/drivers/mtd/nand/nand_base.c
+@@ -1578,7 +1578,6 @@ static void nand_write_page_hwecc(struct mtd_info *mtd, struct nand_chip *chip,
+ 
+ 	for (i = 0; i < chip->ecc.total; i++)
+ 		chip->oob_poi[eccpos[i]] = ecc_calc[i];
+-
+ 	chip->write_buf(mtd, chip->oob_poi, mtd->oobsize);
+ }
+ 
+@@ -2730,6 +2729,149 @@ int nand_scan_tail(struct mtd_info *mtd)
+ 	return 0;
+ }
+ 
++int nand_switch_ecc(struct mtd_info *mtd)
++{
++	int i;
++	struct nand_chip *chip = mtd->priv;
++
++	if (!chip->buffers)
++		return -ENOMEM;
++
++	switch (chip->ecc.mode) {
++	case NAND_ECC_HW:
++		/* Use standard hwecc read page function ? */
++		chip->ecc.read_page = nand_read_page_hwecc;
++		chip->ecc.write_page = nand_write_page_hwecc;
++		chip->ecc.read_oob = nand_read_oob_std;
++		chip->ecc.write_oob = nand_write_oob_std;
++		break;
++	case NAND_ECC_HW_SYNDROME:
++		if ((!chip->ecc.calculate || !chip->ecc.correct ||
++			!chip->ecc.hwctl) &&
++			(!chip->ecc.read_page ||
++			chip->ecc.read_page == nand_read_page_hwecc ||
++			!chip->ecc.write_page ||
++			chip->ecc.write_page == nand_write_page_hwecc)) {
++			printk(KERN_WARNING "No ECC functions supplied, "
++				"Hardware ECC not possible\n");
++			BUG();
++		}
++		/* Use standard syndrome read/write page function ? */
++		chip->ecc.read_page = nand_read_page_syndrome;
++		chip->ecc.write_page = nand_write_page_syndrome;
++		chip->ecc.read_oob = nand_read_oob_syndrome;
++		chip->ecc.write_oob = nand_write_oob_syndrome;
++
++		if (mtd->writesize >= chip->ecc.size)
++			break;
++		printk(KERN_WARNING "%d byte HW ECC not possible on "
++			"%d byte page size, fallback to SW ECC\n",
++			chip->ecc.size, mtd->writesize);
++		chip->ecc.mode = NAND_ECC_SOFT;
++		break;
++	case NAND_ECC_SOFT:
++		chip->ecc.calculate = nand_calculate_ecc;
++		chip->ecc.correct = nand_correct_data;
++		chip->ecc.read_page = nand_read_page_swecc;
++		chip->ecc.write_page = nand_write_page_swecc;
++		chip->ecc.read_oob = nand_read_oob_std;
++		chip->ecc.write_oob = nand_write_oob_std;
++		chip->ecc.size = 256;
++		chip->ecc.bytes = 3;
++		break;
++
++	case NAND_ECC_NONE:
++		printk(KERN_WARNING "NAND_ECC_NONE selected by board driver. "
++			"This is not recommended !!\n");
++		chip->ecc.read_page = nand_read_page_raw;
++		chip->ecc.write_page = nand_write_page_raw;
++		chip->ecc.read_oob = nand_read_oob_std;
++		chip->ecc.write_oob = nand_write_oob_std;
++		chip->ecc.size = mtd->writesize;
++		chip->ecc.bytes = 0;
++		break;
++
++	default:
++		printk(KERN_WARNING "Invalid NAND_ECC_MODE %d\n",
++			chip->ecc.mode);
++		BUG();
++	}
++	/*
++	* The number of bytes available for a client to place data into
++	* the out of band area
++	*/
++	chip->ecc.layout->oobavail = 0;
++	for (i = 0; chip->ecc.layout->oobfree[i].length; i++)
++		chip->ecc.layout->oobavail +=
++			chip->ecc.layout->oobfree[i].length;
++	mtd->oobavail = chip->ecc.layout->oobavail;
++
++	/*
++	* Set the number of read / write steps for one page depending on ECC
++	* mode
++	*/
++	chip->ecc.steps = mtd->writesize / chip->ecc.size;
++	if (chip->ecc.steps * chip->ecc.size != mtd->writesize) {
++		printk(KERN_WARNING "Invalid ecc parameters\n");
++		BUG();
++	}
++	chip->ecc.total = chip->ecc.steps * chip->ecc.bytes;
++
++	/*
++	* Allow subpage writes up to ecc.steps. Not possible for MLC
++	* FLASH.
++	*/
++	if (!(chip->options & NAND_NO_SUBPAGE_WRITE) &&
++		!(chip->cellinfo & NAND_CI_CELLTYPE_MSK)) {
++		switch (chip->ecc.steps) {
++		case 2:
++			mtd->subpage_sft = 1;
++			break;
++		case 4:
++		case 8:
++			mtd->subpage_sft = 2;
++			break;
++		}
++	}
++	chip->subpagesize = mtd->writesize >> mtd->subpage_sft;
++
++	/* Initialize state */
++	chip->state = FL_READY;
++
++	/* De-select the device */
++	chip->select_chip(mtd, -1);
++
++	/* Invalidate the pagebuffer reference */
++	chip->pagebuf = -1;
++
++	/* Fill in remaining MTD driver data */
++	mtd->type = MTD_NANDFLASH;
++	mtd->flags = MTD_CAP_NANDFLASH;
++	mtd->erase = nand_erase;
++	mtd->point = NULL;
++	mtd->unpoint = NULL;
++	mtd->read = nand_read;
++	mtd->write = nand_write;
++	mtd->read_oob = nand_read_oob;
++	mtd->write_oob = nand_write_oob;
++	mtd->sync = nand_sync;
++	mtd->lock = NULL;
++	mtd->unlock = NULL;
++	mtd->suspend = nand_suspend;
++	mtd->resume = nand_resume;
++	mtd->block_isbad = nand_block_isbad;
++	mtd->block_markbad = nand_block_markbad;
++
++	/* propagate ecc.layout to mtd_info */
++	mtd->ecclayout = chip->ecc.layout;
++
++	/* Check, if we should skip the bad block table scan */
++	if (chip->options & NAND_SKIP_BBTSCAN)
++		chip->options |= NAND_BBT_SCANNED;
++
++	return 0;
++}
++
+ /* module_text_address() isn't exported, and it's mostly a pointless
+    test if this is a module _anyway_ -- they'd have to try _really_ hard
+    to call us from in-kernel code if the core NAND support is modular. */
+diff --git a/include/common.h b/include/common.h
+index de3d595..6f47a76 100644
+--- a/include/common.h
++++ b/include/common.h
+@@ -237,12 +237,19 @@ int	autoscript (ulong addr, const char *fit_uname);
+ extern ulong load_addr;		/* Default Load Address */
+ 
+ /* common/cmd_nvedit.c */
+-int	env_init     (void);
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++typedef uchar (*env_get_char_spec_p)(int index);
++typedef int (*env_init_p)(void);
++typedef int (*saveenv_p)(void);
++typedef void (*env_relocate_spec_p)(void);
++#else
++int     env_init(void);
++int     saveenv(void);
++#endif
+ void	env_relocate (void);
+ int	envmatch     (uchar *, int);
+ char	*getenv	     (char *);
+ int	getenv_r     (char *name, char *buf, unsigned len);
+-int	saveenv	     (void);
+ #ifdef CONFIG_PPC		/* ARM version to be fixed! */
+ int inline setenv   (char *, char *);
+ #else
+diff --git a/include/configs/omap3_beagle.h b/include/configs/omap3_beagle.h
+index 7176019..fbad29d 100644
+--- a/include/configs/omap3_beagle.h
++++ b/include/configs/omap3_beagle.h
+@@ -240,7 +240,6 @@
+ #define CFG_MONITOR_BASE	CFG_FLASH_BASE	/* Monitor at start of flash */
+ #define CFG_ONENAND_BASE	ONENAND_MAP
+ 
+-#define CFG_ENV_IS_IN_NAND	1
+ #define ONENAND_ENV_OFFSET	0x260000	/* environment starts here  */
+ #define SMNAND_ENV_OFFSET	0x260000	/* environment starts here  */
+ 
+@@ -261,7 +260,7 @@
+ #define CFG_JFFS2_FIRST_BANK	CFG_MAX_FLASH_BANKS	/* use flash_info[2] */
+ #define CFG_JFFS2_NUM_BANKS	1
+ 
+-#define ENV_IS_VARIABLE		1
++#define CFG_ENV_IS_IN_SEL_RUN	1
+ 
+ #ifndef __ASSEMBLY__
+ extern unsigned int nand_cs_base;
+diff --git a/include/configs/omap3_evm.h b/include/configs/omap3_evm.h
+index 0abfbed..975d17c 100644
+--- a/include/configs/omap3_evm.h
++++ b/include/configs/omap3_evm.h
+@@ -255,7 +255,6 @@
+ #define CFG_MONITOR_BASE	CFG_FLASH_BASE	/* Monitor at start of flash */
+ #define CFG_ONENAND_BASE	ONENAND_MAP
+ 
+-#define CFG_ENV_IS_IN_NAND	1
+ #define ONENAND_ENV_OFFSET	0x240000	/* environment starts here  */
+ #define SMNAND_ENV_OFFSET	0x240000	/* environment starts here  */
+ 
+@@ -276,7 +275,7 @@
+ #define CFG_JFFS2_FIRST_BANK	CFG_MAX_FLASH_BANKS	/* use flash_info[2] */
+ #define CFG_JFFS2_NUM_BANKS	1
+ 
+-#define ENV_IS_VARIABLE		1
++#define CFG_ENV_IS_IN_SEL_RUN	1               /* Sel NAND/OneNAND on fly  */
+ 
+ #ifndef __ASSEMBLY__
+ extern unsigned int nand_cs_base;
+diff --git a/include/configs/omap3_overo.h b/include/configs/omap3_overo.h
+index 5f3b88d..b7f96f4 100644
+--- a/include/configs/omap3_overo.h
++++ b/include/configs/omap3_overo.h
+@@ -233,7 +233,6 @@
+ #define CFG_MONITOR_BASE	CFG_FLASH_BASE	/* Monitor at start of flash */
+ #define CFG_ONENAND_BASE	ONENAND_MAP
+ 
+-#define CFG_ENV_IS_IN_ONENAND	1
+ #define ONENAND_ENV_OFFSET	0x260000	/* environment starts here  */
+ #define SMNAND_ENV_OFFSET	0x260000	/* environment starts here  */
+ 
+@@ -254,7 +253,7 @@
+ #define CFG_JFFS2_FIRST_BANK	CFG_MAX_FLASH_BANKS	/* use flash_info[2] */
+ #define CFG_JFFS2_NUM_BANKS	1
+ 
+-#define ENV_IS_VARIABLE		1
++#define CFG_ENV_IS_IN_SEL_RUN   1
+ 
+ #ifndef __ASSEMBLY__
+ extern unsigned int nand_cs_base;
+diff --git a/include/environment.h b/include/environment.h
+index 481ea73..890994d 100644
+--- a/include/environment.h
++++ b/include/environment.h
+@@ -69,7 +69,8 @@
+ # endif
+ #endif	/* CFG_ENV_IS_IN_FLASH */
+ 
+-#if defined(CFG_ENV_IS_IN_NAND)
++#if defined(CFG_ENV_IS_IN_NAND) || \
++	(defined(CONFIG_CMD_NAND) && defined(CFG_ENV_IS_IN_SEL_RUN))
+ # ifndef CFG_ENV_OFFSET
+ #  error "Need to define CFG_ENV_OFFSET when using CFG_ENV_IS_IN_NAND"
+ # endif
+diff --git a/lib_arm/board.c b/lib_arm/board.c
+index 6e3ef08..7b7c5e0 100644
+--- a/lib_arm/board.c
++++ b/lib_arm/board.c
+@@ -58,12 +58,17 @@
+ DECLARE_GLOBAL_DATA_PTR;
+ 
+ ulong monitor_flash_len;
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++extern void gpmc_init(void);
++extern void print_board_info(void);
++#endif
+ 
+ #ifdef CONFIG_HAS_DATAFLASH
+ extern int  AT91F_DataflashInit(void);
+ extern void dataflash_print_info(void);
+ #endif
+ 
++
+ #ifndef CONFIG_IDENT_STRING
+ #define CONFIG_IDENT_STRING ""
+ #endif
+@@ -258,6 +263,7 @@ static int reloc_init(void)
+ typedef int (init_fnc_t) (void);
+ 
+ int print_cpuinfo (void); /* test-only */
++extern env_init_p env_init;
+ 
+ init_fnc_t *init_sequence[] = {
+ 	cpu_init,		/* basic cpu dependent setup */
+@@ -268,7 +274,11 @@ init_fnc_t *init_sequence[] = {
+ #endif
+ 	board_init,		/* basic board dependent setup */
+ 	interrupt_init,		/* set up exceptions */
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++	NULL,			/* initialize environment */
++#else
+ 	env_init,		/* initialize environment */
++#endif
+ 	init_baudrate,		/* initialze baudrate settings */
+ 	serial_init,		/* serial communications setup */
+ 	console_init_f,		/* stage 1 init of console */
+@@ -353,6 +363,11 @@ void start_armboot (void)
+ 	/* armboot_start is defined in the board-specific linker script */
+ 	mem_malloc_init (_armboot_start - CFG_MALLOC_LEN);
+ 
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++	gpmc_init(); /* in SRAM or SDRAM, finish GPMC */
++	env_init();
++#endif
++
+ #if defined(CONFIG_CMD_NAND)
+ 	puts ("NAND:  ");
+ 	nand_init();		/* go init the NAND */
+@@ -379,6 +394,11 @@ void start_armboot (void)
+ 	serial_initialize();
+ #endif
+ 
++#if defined(CFG_ENV_IS_IN_SEL_RUN)
++	display_banner();
++	print_board_info();
++#endif
++
+ 	/* IP Address */
+ 	gd->bd->bi_ip_addr = getenv_IPaddr ("ipaddr");
+ 
+-- 
+1.5.6
+
