@@ -45,6 +45,7 @@ ARAGO_EXTRA_INSTALL = "\
     thttpd \
     gdbserver \
     opkg-nogpg \
+    arago-feed-configs \
     cppstub \
     "
 
