@@ -21,7 +21,12 @@ ARAGO_EXTRA_INSTALL = "\
     dosfstools \
     util-linux-fdisk \
     util-linux-sfdisk \
-    dropbear \
+    openssh \
+    git \
+#    x11vnc \
+#    angstrom-x11vnc-xinit \
+    synergy \
+    omapfbplay \
     "
 
 # Disable this due to distribution restrictions
