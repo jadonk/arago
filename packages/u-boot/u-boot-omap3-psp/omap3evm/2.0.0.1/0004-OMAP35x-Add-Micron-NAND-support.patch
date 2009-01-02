@@ -1,0 +1,68 @@
+From 5182fd58b3815eda76ab07c72b58500c5f3d2a52 Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Fri, 12 Sep 2008 13:47:23 +0530
+Subject: [PATCH 4/6] OMAP35x : Add Micron NAND support.
+
+---
+ common/cmd_nand.c           |    9 ++++++---
+ include/configs/omap3_evm.h |    3 ++-
+ 2 files changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/common/cmd_nand.c b/common/cmd_nand.c
+index af3eb9b..9ae434f 100644
+--- a/common/cmd_nand.c
++++ b/common/cmd_nand.c
+@@ -38,7 +38,8 @@ int find_dev_and_part(const char *id, struct mtd_device **dev,
+ 		      u8 *part_num, struct part_info **part);
+ #endif
+ 
+-#if defined(CONFIG_OMAP) && (defined(CONFIG_OMAP3_BEAGLE))
++#if defined(CONFIG_OMAP) && (defined(CONFIG_OMAP3_BEAGLE)\
++		|| defined(CONFIG_OMAP3_EVM))
+ extern void omap_nand_switch_ecc(nand_info_t *nand, int hardware);
+ #endif
+ 
+@@ -322,7 +323,8 @@ int do_nand(cmd_tbl_t * cmdtp, int flag, int argc, char *argv[])
+ 
+ 	}
+ 
+-#if defined(CONFIG_OMAP) && (defined(CONFIG_OMAP3_BEAGLE))
++#if defined(CONFIG_OMAP) && (defined(CONFIG_OMAP3_BEAGLE) \
++		|| defined(CONFIG_OMAP3_EVM))
+ 	if (strncmp(cmd, "ecc", 3) == 0) {
+ 		if (argc < 2)
+ 			goto usage;
+@@ -503,7 +505,8 @@ U_BOOT_CMD(nand, 5, 1, do_nand,
+ 	   "nand scrub - really clean NAND erasing bad blocks (UNSAFE)\n"
+ 	   "nand markbad off - mark bad block at offset (UNSAFE)\n"
+ 	   "nand biterr off - make a bit error at offset (UNSAFE)\n"
+-#if defined(CONFIG_OMAP) && (defined(CONFIG_OMAP3_BEAGLE))
++#if defined(CONFIG_OMAP) && (defined(CONFIG_OMAP3_BEAGLE) \
++		|| defined(CONFIG_OMAP3_EVM))
+ 	   "nand ecc [hw/sw] - switch the ecc calculation algorithm \n"
+ #endif
+ 	   "nand lock [tight] [status]\n"
+diff --git a/include/configs/omap3_evm.h b/include/configs/omap3_evm.h
+index cad7848..0abfbed 100644
+--- a/include/configs/omap3_evm.h
++++ b/include/configs/omap3_evm.h
+@@ -42,6 +42,7 @@
+ #define CONFIG_OMAP		1	/* in a TI OMAP core */
+ #define CONFIG_OMAP34XX		1	/* which is a 34XX */
+ #define CONFIG_OMAP3430		1	/* which is in a 3430 */
++#define CONFIG_OMAP3_EVM	1	/* working with EVM */
+ #define CONFIG_DOS_PARTITION	1
+ 
+ #include <asm/arch/cpu.h>	/* get chip and board defs */
+@@ -254,7 +255,7 @@
+ #define CFG_MONITOR_BASE	CFG_FLASH_BASE	/* Monitor at start of flash */
+ #define CFG_ONENAND_BASE	ONENAND_MAP
+ 
+-#define CFG_ENV_IS_IN_ONENAND	1
++#define CFG_ENV_IS_IN_NAND	1
+ #define ONENAND_ENV_OFFSET	0x240000	/* environment starts here  */
+ #define SMNAND_ENV_OFFSET	0x240000	/* environment starts here  */
+ 
+-- 
+1.5.6
+

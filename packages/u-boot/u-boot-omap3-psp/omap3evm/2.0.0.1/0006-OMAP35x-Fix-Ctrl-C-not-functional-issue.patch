@@ -1,0 +1,40 @@
+From 0c9ebcbe80104512d0cf6282bcb18074c2ec1dae Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Tue, 16 Sep 2008 12:33:24 +0530
+Subject: [PATCH 6/6] OMAP35x : Fix Ctrl+C not functional issue.
+
+---
+ lib_arm/board.c |   10 +++++-----
+ 1 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/lib_arm/board.c b/lib_arm/board.c
+index 7b7c5e0..967edd7 100644
+--- a/lib_arm/board.c
++++ b/lib_arm/board.c
+@@ -366,6 +366,11 @@ void start_armboot (void)
+ #if defined(CFG_ENV_IS_IN_SEL_RUN)
+ 	gpmc_init(); /* in SRAM or SDRAM, finish GPMC */
+ 	env_init();
++	init_baudrate();        /* initialze baudrate settings */
++	serial_init();          /* serial communications setup */
++	console_init_f();       /* stage 1 init of console */
++	display_banner();
++	print_board_info();
+ #endif
+ 
+ #if defined(CONFIG_CMD_NAND)
+@@ -394,11 +399,6 @@ void start_armboot (void)
+ 	serial_initialize();
+ #endif
+ 
+-#if defined(CFG_ENV_IS_IN_SEL_RUN)
+-	display_banner();
+-	print_board_info();
+-#endif
+-
+ 	/* IP Address */
+ 	gd->bd->bi_ip_addr = getenv_IPaddr ("ipaddr");
+ 
+-- 
+1.5.6
+

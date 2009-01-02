@@ -1,0 +1,25 @@
+From 735d699c2bbf1d98969c6f586e58f6dcad3cdff0 Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Fri, 19 Sep 2008 19:41:42 +0530
+Subject: [PATCH 21/24] OMAP35x : fix compiler warning with ALSA Mixer.
+
+---
+ sound/arm/omap/omap-alsa-twl4030-mixer.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/sound/arm/omap/omap-alsa-twl4030-mixer.c b/sound/arm/omap/omap-alsa-twl4030-mixer.c
+index b940790..1d679ec 100644
+--- a/sound/arm/omap/omap-alsa-twl4030-mixer.c
++++ b/sound/arm/omap/omap-alsa-twl4030-mixer.c
+@@ -813,7 +813,7 @@ static int snd_capture_source_put(struct snd_kcontrol *kcontrol,
+ 
+ /* Controls Registered */
+ 
+-static struct snd_kcontrol_new twl4030_control[] __devinitdata = {
++static struct snd_kcontrol_new twl4030_control[] = {
+ 	/* Output Control*/
+ 	{
+ 		.name   = "T2 Master codec Sample Rate",
+-- 
+1.5.6
+

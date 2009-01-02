@@ -1,0 +1,2383 @@
+From 33ac4373a0e949ecea897524e9e8538bb2aded19 Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Fri, 12 Sep 2008 13:44:56 +0530
+Subject: [PATCH 2/6] OMAP35x : Add support for OneNAND and TFTP
+
+---
+ board/omap3/evm/evm.c              |    4 +-
+ common/cmd_onenand.c               |  174 ++++---
+ drivers/mtd/onenand/onenand_base.c | 1002 +++++++++++-------------------------
+ drivers/mtd/onenand/onenand_bbt.c  |   26 +-
+ include/asm-arm/arch-omap3/mux.h   |  634 +++++++++++++++++++++++-
+ include/configs/omap3_evm.h        |    7 +-
+ include/onenand_uboot.h            |    7 +
+ net/net.c                          |    1 -
+ net/tftp.c                         |    2 +-
+ 9 files changed, 1077 insertions(+), 780 deletions(-)
+
+diff --git a/board/omap3/evm/evm.c b/board/omap3/evm/evm.c
+index f773407..88f249d 100644
+--- a/board/omap3/evm/evm.c
++++ b/board/omap3/evm/evm.c
+@@ -68,8 +68,6 @@ int board_init(void)
+ int misc_init_r(void)
+ {
+ 
+-	unsigned char byte;
+-
+ #ifdef CONFIG_DRIVER_OMAP34XX_I2C
+ 	i2c_init(CFG_I2C_SPEED, CFG_I2C_SLAVE);
+ #endif
+@@ -89,7 +87,7 @@ int misc_init_r(void)
+  *****************************************************************************/
+ void set_muxconf_regs(void)
+ {
+-	MUX_DEFAULT_ES2();
++	MUX_DEFAULT_EVM();
+ }
+ 
+ /******************************************************************************
+diff --git a/common/cmd_onenand.c b/common/cmd_onenand.c
+index 8d87b78..3285707 100644
+--- a/common/cmd_onenand.c
++++ b/common/cmd_onenand.c
+@@ -24,6 +24,7 @@ extern struct onenand_chip onenand_chip;
+ int do_onenand(cmd_tbl_t * cmdtp, int flag, int argc, char *argv[])
+ {
+ 	int ret = 0;
++	loff_t ofs = 0;
+ 
+ 	switch (argc) {
+ 	case 0:
+@@ -36,126 +37,171 @@ int do_onenand(cmd_tbl_t * cmdtp, int flag, int argc, char *argv[])
+ 			onenand_init();
+ 			return 0;
+ 		}
++		if (strncmp(argv[1], "info", 4) != 0)
++			printf("OneNAND: Incorrect command/number of args\n");
+ 		printf("%s\n", onenand_mtd.name);
+ 		return 0;
++	case 3:
++		if ((strncmp(argv[1], "markbad", 7) == 0) && (argc == 3)) {
++			int ret ;
++			ofs = simple_strtoul(argv[2], NULL, 16);
++			if (ofs >= onenand_mtd.size) {
++				printf("Error : offset exceeds size\n");
++				return 0;
++			} else
++				ret = onenand_block_markbad(&onenand_mtd, ofs);
++
++			if (ret)
++				printf("Error marking bad-block\n");
++			else
++				printf("Done\n");
++			return 0;
++		}
++		printf("OneNAND : wrong number of arguments\n");
++		onenand_print_device_info(onenand_chip.device_id);
++		printf("Usage:\n%s\n", cmdtp->usage);
++		return 0;
+ 
+ 	default:
+ 		/* At least 4 args */
+-		if (strncmp(argv[1], "erase", 5) == 0) {
++		if (((strncmp(argv[1], "erase", 5) == 0) ||
++			(strncmp(argv[1], "scrub", 5) == 0)) &&
++			(argc == 4)) {
+ 			struct erase_info instr = {
+ 				.callback	= NULL,
+ 			};
+-			ulong start, end;
+-			ulong block;
++			ulong start = 0 , end = 0;
++			ulong block = 0;
+ 			char *endtail;
+ 
+ 			if (strncmp(argv[2], "block", 5) == 0) {
+ 				start = simple_strtoul(argv[3], NULL, 10);
+ 				endtail = strchr(argv[3], '-');
+ 				end = simple_strtoul(endtail + 1, NULL, 10);
++				if (end < start) {
++					printf("Error : erase failed - ");
++					printf("end block incorrect\n");
++					break;
++				}
+ 			} else {
+ 				start = simple_strtoul(argv[2], NULL, 10);
+ 				end = simple_strtoul(argv[3], NULL, 10);
+-
+ 				start >>= onenand_chip.erase_shift;
+ 				end >>= onenand_chip.erase_shift;
+ 				/* Don't include the end block */
+ 				end--;
+ 			}
+ 
+-			if (!end || end < 0)
+-				end = start;
++			if (!end || (end < start)) {
++				printf("Error : erase failed ");
++				printf("end address incorrect\n");
++				break;
++			}
+ 
+ 			printf("Erase block from %lu to %lu\n", start, end);
+ 
+ 			for (block = start; block <= end; block++) {
+ 				instr.addr = block << onenand_chip.erase_shift;
+ 				instr.len = 1 << onenand_chip.erase_shift;
++				if (strncmp(argv[1], "scrub", 5) == 0)
++					instr.priv = ONENAND_SCRUB;
++				else
++					instr.priv = 0;
++
+ 				ret = onenand_erase(&onenand_mtd, &instr);
+-				if (ret) {
++				if (ret)
+ 					printf("erase failed %lu\n", block);
+-					break;
+-				}
+ 			}
+-
+ 			return 0;
+-		}
+ 
+-		if (strncmp(argv[1], "read", 4) == 0) {
++		} else if ((strncmp(argv[1], "read", 4) == 0) &&
++				(argc == 5)) {
++			struct mtd_oob_ops oob_ops;
++			size_t len = 0, retlen = 0;
+ 			ulong addr = simple_strtoul(argv[2], NULL, 16);
+-			ulong ofs = simple_strtoul(argv[3], NULL, 16);
+-			size_t len = simple_strtoul(argv[4], NULL, 16);
+ 			int oob = strncmp(argv[1], "read.oob", 8) ? 0 : 1;
+-			struct mtd_oob_ops ops;
+ 
+-			ops.mode = MTD_OOB_PLACE;
++			ofs = simple_strtoul(argv[3], NULL, 16);
++			len = simple_strtoul(argv[4], NULL, 16);
+ 
+ 			if (oob) {
+-				ops.len = 0;
+-				ops.datbuf = NULL;
+-				ops.ooblen = len;
+-				ops.oobbuf = (u_char *) addr;
+-			} else {
+-				ops.len = len;
+-				ops.datbuf = (u_char *) addr;
+-				ops.ooblen = 0;
+-				ops.oobbuf = NULL;
+-			}
+-			ops.retlen = ops.oobretlen = 0;
+-
+-			onenand_mtd.read_oob(&onenand_mtd, ofs, &ops);
+-			printf("Done\n");
++				oob_ops.mode = MTD_OOB_AUTO;
++				oob_ops.len = len;
++				oob_ops.ooblen = len;
++				oob_ops.datbuf = NULL;
++				oob_ops.oobbuf = (u_char *)addr;
++				ret = onenand_read_oob(&onenand_mtd, ofs,
++						&oob_ops);
++			} else
++				ret = onenand_read(&onenand_mtd, ofs, len,
++						&retlen, (u_char *) addr);
++			if (ret)
++				printf("Error reading from device\n");
++			else
++				printf("Done\n");
+ 
+ 			return 0;
+-		}
+ 
+-		if (strncmp(argv[1], "write", 5) == 0) {
++		} else if ((strncmp(argv[1], "write", 5) == 0) &&
++			(argc == 5)) {
++			size_t len = 0, retlen = 0;
+ 			ulong addr = simple_strtoul(argv[2], NULL, 16);
+-			ulong ofs = simple_strtoul(argv[3], NULL, 16);
+-			size_t len = simple_strtoul(argv[4], NULL, 16);
+-			size_t retlen = 0;
+ 
+-			onenand_write(&onenand_mtd, ofs, len, &retlen,
++			ofs = simple_strtoul(argv[3], NULL, 16);
++			len = simple_strtoul(argv[4], NULL, 16);
++			ret = onenand_write(&onenand_mtd, ofs, len, &retlen,
+ 				      (u_char *) addr);
+-			printf("Done\n");
++			if (ret)
++				printf("Error writing to device\n");
++			else
++				printf("Done\n");
+ 
+ 			return 0;
+-		}
+ 
+-		if (strncmp(argv[1], "block", 5) == 0) {
++		} else if (strncmp(argv[1], "block", 5) == 0) {
++			ulong page = 0;
++			size_t len = 0;
++			size_t retlen = 0;
++			struct mtd_oob_ops oob_ops;
+ 			ulong addr = simple_strtoul(argv[2], NULL, 16);
+ 			ulong block = simple_strtoul(argv[3], NULL, 10);
+-			ulong page = simple_strtoul(argv[4], NULL, 10);
+-			size_t len = simple_strtol(argv[5], NULL, 10);
+-			ulong ofs;
+ 			int oob = strncmp(argv[1], "block.oob", 9) ? 0 : 1;
+-			struct mtd_oob_ops ops;
+-
+-			ops.mode = MTD_OOB_PLACE;
+-
+ 
++			if (argc >= 5)
++				page = simple_strtoul(argv[4], NULL, 10);
++			if (argc >= 6)
++				len = simple_strtol(argv[5], NULL, 10);
+ 			ofs = block << onenand_chip.erase_shift;
++
+ 			if (page)
+ 				ofs += page << onenand_chip.page_shift;
+ 
+ 			if (!len) {
+ 				if (oob)
+-					ops.ooblen = 64;
++					len = 64;
+ 				else
+-					ops.len = 512;
++					len = 512;
+ 			}
+ 
+ 			if (oob) {
+-				ops.datbuf = NULL;
+-				ops.oobbuf = (u_char *) addr;
+-			} else {
+-				ops.datbuf = (u_char *) addr;
+-				ops.oobbuf = NULL;
+-			}
+-			ops.retlen = ops.oobretlen = 0;
+-
+-			onenand_read_oob(&onenand_mtd, ofs, &ops);
+-			return 0;
++				oob_ops.mode = MTD_OOB_AUTO;
++				oob_ops.len = len;
++				oob_ops.ooblen = len;
++				oob_ops.datbuf = NULL;
++				oob_ops.oobbuf = (u_char *)addr;
++				ret = onenand_read_oob(&onenand_mtd, ofs,
++						&oob_ops);
++			} else
++				ret = onenand_read(&onenand_mtd, ofs, len,
++					&retlen, (u_char *) addr);
++			if (ret)
++				printf("Error reading from device\n");
++			else
++				return 0;
++		} else {
++			printf("OneNAND : wrong number of arguments\n");
++			onenand_print_device_info(onenand_chip.device_id);
++			printf("Usage:\n%s\n", cmdtp->usage);
+ 		}
+ 
+ 		break;
+@@ -169,8 +215,16 @@ U_BOOT_CMD(
+ 	"onenand - OneNAND sub-system\n",
+ 	"info   - show available OneNAND devices\n"
+ 	"onenand read[.oob] addr ofs len - read data at ofs with len to addr\n"
++	"       ---ofs and len(not for oob) have to be page aligned\n"
+ 	"onenand write addr ofs len - write data at ofs with len from addr\n"
++	"       ---ofs and len have to be page aligned\n"
+ 	"onenand erase saddr eaddr - erase block start addr to end addr\n"
+-	"onenand block[.oob] addr block [page] [len] - "
+-		"read data with (block [, page]) to addr"
++	"onenand erase block sblk-endblk - erase blocks sblk to endblk\n"
++	"       ---erase command does not erase bad blocks\n"
++	"onenand scrub block start-end - erase block from start to end\n"
++	"onenand scrub saddr eaddr - erase blocks start addr to end addr\n"
++	"       ---CAUTION :scrub command erases bad blocks also\n"
++	"onenand block[.oob] addr block [page] [len]\n"
++	"       ---read data with (block [, page]) to addr\n"
++	"onenand markbad ofs - mark bad-block at ofs\n"
+ );
+diff --git a/drivers/mtd/onenand/onenand_base.c b/drivers/mtd/onenand/onenand_base.c
+index c22a8a8..192962f 100644
+--- a/drivers/mtd/onenand/onenand_base.c
++++ b/drivers/mtd/onenand/onenand_base.c
+@@ -4,11 +4,6 @@
+  *  Copyright (C) 2005-2007 Samsung Electronics
+  *  Kyungmin Park <kyungmin.park@samsung.com>
+  *
+- *  Credits:
+- *      Adrian Hunter <ext-adrian.hunter@nokia.com>:
+- *      auto-placement support, read-while load support, various fixes
+- *      Copyright (C) Nokia Corporation, 2007
+- *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License version 2 as
+  * published by the Free Software Foundation.
+@@ -71,6 +66,58 @@ static void onenand_writew(unsigned short value, void __iomem * addr)
+ }
+ 
+ /**
++ * onenand_block_checkbad - [GENERIC] Check if a block is marked bad
++ * @param mtd           MTD device structure
++ * @param ofs           offset from device start
++ * @param getchip       0, if the chip is already selected
++ * @param allowbbt      1, if its allowed to access the bbt area
++ *
++ * Check, if the block is bad. Either by reading the bad block table or
++ * calling of the scan function.
++ */
++int onenand_block_checkbad(struct mtd_info *mtd, int ofs, int getchip,
++			int allowbbt)
++{
++	struct onenand_chip *this = mtd->priv;
++	struct bbm_info *bbm = this->bbm;
++
++	/* Return info from the table */
++	return bbm->isbad_bbt(mtd, ofs, allowbbt);
++}
++
++/**
++ * onenand_default_block_markbad - [DEFAULT] mark a block bad
++ * @param mtd           MTD device structure
++ * @param ofs           offset from device start
++ *
++ * This is the default implementation, which can be overridden by
++ * a hardware specific driver.
++ */
++int onenand_default_block_markbad(struct mtd_info *mtd, loff_t ofs)
++{
++	struct onenand_chip *this = mtd->priv;
++	struct bbm_info *bbm = this->bbm;
++	u_char buf[2] = {0x0A, 0x0A};
++	int block;
++	struct mtd_oob_ops oob_ops;
++
++	/* Get block number */
++	block = ((int) ofs) >> bbm->bbt_erase_shift;
++	if (bbm->bbt)
++		bbm->bbt[block >> 2] |= 0x01 << ((block & 0x03) << 1);
++
++	/* We write two bytes, so we dont have to mess with 16 bit access */
++	ofs += mtd->oobsize + (bbm->badblockpos & ~0x01);
++	oob_ops.mode = MTD_OOB_AUTO;
++	oob_ops.len = 2;
++	oob_ops.ooblen = 2;
++	oob_ops.datbuf = NULL;
++	oob_ops.oobbuf = buf;
++	return onenand_write_oob(mtd, ofs, &oob_ops);
++}
++
++
++/**
+  * onenand_block_address - [DEFAULT] Get block address
+  * @param device	the device id
+  * @param block		the block
+@@ -517,6 +564,7 @@ static void onenand_invalidate_bufferram(struct mtd_info *mtd, loff_t addr,
+ static void onenand_get_device(struct mtd_info *mtd, int new_state)
+ {
+ 	/* Do nothing */
++	return;
+ }
+ 
+ /**
+@@ -528,276 +576,98 @@ static void onenand_get_device(struct mtd_info *mtd, int new_state)
+ static void onenand_release_device(struct mtd_info *mtd)
+ {
+ 	/* Do nothing */
++	return;
+ }
+ 
+ /**
+- * onenand_transfer_auto_oob - [Internal] oob auto-placement transfer
+- * @param mtd		MTD device structure
+- * @param buf		destination address
+- * @param column	oob offset to read from
+- * @param thislen	oob length to read
+- */
+-static int onenand_transfer_auto_oob(struct mtd_info *mtd, uint8_t *buf,
+-					int column, int thislen)
+-{
+-	struct onenand_chip *this = mtd->priv;
+-	struct nand_oobfree *free;
+-	int readcol = column;
+-	int readend = column + thislen;
+-	int lastgap = 0;
+-	unsigned int i;
+-	uint8_t *oob_buf = this->oob_buf;
+-
+-	free = this->ecclayout->oobfree;
+-	for (i = 0; i < MTD_MAX_OOBFREE_ENTRIES && free->length; i++, free++) {
+-		if (readcol >= lastgap)
+-			readcol += free->offset - lastgap;
+-		if (readend >= lastgap)
+-			readend += free->offset - lastgap;
+-		lastgap = free->offset + free->length;
+-	}
+-	this->read_bufferram(mtd, ONENAND_SPARERAM, oob_buf, 0, mtd->oobsize);
+-	free = this->ecclayout->oobfree;
+-	for (i = 0; i < MTD_MAX_OOBFREE_ENTRIES && free->length; i++, free++) {
+-		int free_end = free->offset + free->length;
+-		if (free->offset < readend && free_end > readcol) {
+-			int st = max_t(int,free->offset,readcol);
+-			int ed = min_t(int,free_end,readend);
+-			int n = ed - st;
+-			memcpy(buf, oob_buf + st, n);
+-			buf += n;
+-		} else if (column == 0)
+-			break;
+-	}
+-	return 0;
+-}
+-
+-/**
+- * onenand_read_ops_nolock - [OneNAND Interface] OneNAND read main and/or out-of-band
++ * onenand_read_ecc - [MTD Interface] Read data with ECC
+  * @param mtd		MTD device structure
+  * @param from		offset to read from
+- * @param ops		oob operation description structure
++ * @param len		number of bytes to read
++ * @param retlen	pointer to variable to store the number of read bytes
++ * @param buf		the databuffer to put data
++ * @param oob_buf	filesystem supplied oob data buffer
++ * @param oobsel	oob selection structure
+  *
+- * OneNAND read main and/or out-of-band data
++ * OneNAND read with ECC
+  */
+-static int onenand_read_ops_nolock(struct mtd_info *mtd, loff_t from,
+-		struct mtd_oob_ops *ops)
++static int onenand_read_ecc(struct mtd_info *mtd, loff_t from, size_t len,
++			    size_t *retlen, u_char *buf,
++			    u_char *oob_buf, struct nand_oobinfo *oobsel)
+ {
+ 	struct onenand_chip *this = mtd->priv;
+-	struct mtd_ecc_stats stats;
+-	size_t len = ops->len;
+-	size_t ooblen = ops->ooblen;
+-	u_char *buf = ops->datbuf;
+-	u_char *oobbuf = ops->oobbuf;
+-	int read = 0, column, thislen;
+-	int oobread = 0, oobcolumn, thisooblen, oobsize;
+-	int ret = 0, boundary = 0;
+-	int writesize = this->writesize;
+-
+-	MTDDEBUG(MTD_DEBUG_LEVEL3,
+-		"onenand_read_ops_nolock: from = 0x%08x, len = %i\n",
+-		(unsigned int) from, (int) len);
+-
+-	if (ops->mode == MTD_OOB_AUTO)
+-		oobsize = this->ecclayout->oobavail;
+-	else
+-		oobsize = mtd->oobsize;
++	int read = 0, column;
++	int thislen;
++	int ret = 0;
+ 
+-	oobcolumn = from & (mtd->oobsize - 1);
++	MTDDEBUG(MTD_DEBUG_LEVEL3, "onenand_read_ecc: "
++		  "from = 0x%08x, len = %i\n",
++		  (unsigned int)from, (int)len);
+ 
+ 	/* Do not allow reads past end of device */
+ 	if ((from + len) > mtd->size) {
+-		printk(KERN_ERR "onenand_read_ops_nolock: Attempt read beyond end of device\n");
+-		ops->retlen = 0;
+-		ops->oobretlen = 0;
++		MTDDEBUG(MTD_DEBUG_LEVEL0, "onenand_read_ecc: "
++			  "Attempt read beyond end of device\n");
++		*retlen = 0;
+ 		return -EINVAL;
+ 	}
+ 
+-	stats = mtd->ecc_stats;
+-
+-	/* Read-while-load method */
++	/* Grab the lock and see if the device is available */
++	onenand_get_device(mtd, FL_READING);
++	onenand_invalidate_bufferram(mtd, from, len);
+ 
+-	/* Do first load to bufferRAM */
+-	if (read < len) {
+-		if (!onenand_check_bufferram(mtd, from)) {
+-			this->command(mtd, ONENAND_CMD_READ, from, writesize);
+-			ret = this->wait(mtd, FL_READING);
+-			onenand_update_bufferram(mtd, from, !ret);
+-			if (ret == -EBADMSG)
+-				ret = 0;
+-		}
+-	}
++	while (read < len) {
++		thislen = min_t(int, mtd->writesize, len - read);
+ 
+-	thislen = min_t(int, writesize, len - read);
+-	column = from & (writesize - 1);
+-	if (column + thislen > writesize)
+-		thislen = writesize - column;
++		column = from & (mtd->writesize - 1);
++		if (column + thislen > mtd->writesize)
++			thislen = mtd->writesize - column;
+ 
+-	while (!ret) {
+-		/* If there is more to load then start next load */
+-		from += thislen;
+-		if (read + thislen < len) {
+-			this->command(mtd, ONENAND_CMD_READ, from, writesize);
+-			/*
+-			 * Chip boundary handling in DDP
+-			 * Now we issued chip 1 read and pointed chip 1
+-			 * bufferam so we have to point chip 0 bufferam.
+-			 */
+-			if (ONENAND_IS_DDP(this) &&
+-					unlikely(from == (this->chipsize >> 1))) {
+-				this->write_word(ONENAND_DDP_CHIP0, this->base + ONENAND_REG_START_ADDRESS2);
+-				boundary = 1;
+-			} else
+-				boundary = 0;
+-			ONENAND_SET_PREV_BUFFERRAM(this);
++		if (onenand_block_isbad(mtd, from) > 0) {
++			printf("onenand_read_ecc: \
++				detected bad block  @0x%x\n", (int)from);
++			from += mtd->erasesize;
++			continue;
+ 		}
+ 
+-		/* While load is going, read from last bufferRAM */
+-		this->read_bufferram(mtd, ONENAND_DATARAM, buf, column, thislen);
+-
+-		/* Read oob area if needed */
+-		if (oobbuf) {
+-			thisooblen = oobsize - oobcolumn;
+-			thisooblen = min_t(int, thisooblen, ooblen - oobread);
+-
+-			if (ops->mode == MTD_OOB_AUTO)
+-				onenand_transfer_auto_oob(mtd, oobbuf, oobcolumn, thisooblen);
+-			else
+-				this->read_bufferram(mtd, ONENAND_SPARERAM, oobbuf, oobcolumn, thisooblen);
+-			oobread += thisooblen;
+-			oobbuf += thisooblen;
+-			oobcolumn = 0;
++		if (!onenand_check_bufferram(mtd, from)) {
++			this->command(mtd, ONENAND_CMD_READ, from,
++				      mtd->writesize);
++			ret = this->wait(mtd, FL_READING);
++			/* First copy data and check return value for
++			ECC handling */
++			onenand_update_bufferram(mtd, from, 1);
+ 		}
+ 
+-		/* See if we are done */
++		this->read_bufferram(mtd, ONENAND_DATARAM, buf, column,
++					thislen);
++
+ 		read += thislen;
+ 		if (read == len)
+ 			break;
+-		/* Set up for next read from bufferRAM */
+-		if (unlikely(boundary))
+-			this->write_word(ONENAND_DDP_CHIP1, this->base + ONENAND_REG_START_ADDRESS2);
+-		ONENAND_SET_NEXT_BUFFERRAM(this);
+-		buf += thislen;
+-		thislen = min_t(int, writesize, len - read);
+-		column = 0;
+ 
+-		/* Now wait for load */
+-		ret = this->wait(mtd, FL_READING);
+-		onenand_update_bufferram(mtd, from, !ret);
+-		if (ret == -EBADMSG)
+-			ret = 0;
++		if (ret) {
++			printf("onenand_read_ecc :read failed\n");
++			printf("block @ 0x%x as gone bad\n", (int)from);
++			onenand_block_markbad(mtd, from);
++			goto out;
++		}
++
++		from += thislen;
++		buf += thislen;
+ 	}
+ 
++out:
++	/* Deselect and wake up anyone waiting on the device */
++	onenand_release_device(mtd);
++
+ 	/*
+ 	 * Return success, if no ECC failures, else -EBADMSG
+ 	 * fs driver will take care of that, because
+ 	 * retlen == desired len and result == -EBADMSG
+ 	 */
+-	ops->retlen = read;
+-	ops->oobretlen = oobread;
+-
+-	if (ret)
+-		return ret;
+-
+-	if (mtd->ecc_stats.failed - stats.failed)
+-		return -EBADMSG;
+-
+-	return mtd->ecc_stats.corrected - stats.corrected ? -EUCLEAN : 0;
+-}
+-
+-/**
+- * onenand_read_oob_nolock - [MTD Interface] OneNAND read out-of-band
+- * @param mtd		MTD device structure
+- * @param from		offset to read from
+- * @param ops		oob operation description structure
+- *
+- * OneNAND read out-of-band data from the spare area
+- */
+-static int onenand_read_oob_nolock(struct mtd_info *mtd, loff_t from,
+-		struct mtd_oob_ops *ops)
+-{
+-	struct onenand_chip *this = mtd->priv;
+-	struct mtd_ecc_stats stats;
+-	int read = 0, thislen, column, oobsize;
+-	size_t len = ops->ooblen;
+-	mtd_oob_mode_t mode = ops->mode;
+-	u_char *buf = ops->oobbuf;
+-	int ret = 0;
+-
+-	from += ops->ooboffs;
+-
+-	MTDDEBUG(MTD_DEBUG_LEVEL3,
+-		"onenand_read_oob_nolock: from = 0x%08x, len = %i\n",
+-		(unsigned int) from, (int) len);
+-
+-	/* Initialize return length value */
+-	ops->oobretlen = 0;
+-
+-	if (mode == MTD_OOB_AUTO)
+-		oobsize = this->ecclayout->oobavail;
+-	else
+-		oobsize = mtd->oobsize;
+-
+-	column = from & (mtd->oobsize - 1);
+-
+-	if (unlikely(column >= oobsize)) {
+-		printk(KERN_ERR "onenand_read_oob_nolock: Attempted to start read outside oob\n");
+-		return -EINVAL;
+-	}
+-
+-	/* Do not allow reads past end of device */
+-	if (unlikely(from >= mtd->size ||
+-		column + len > ((mtd->size >> this->page_shift) -
+-				(from >> this->page_shift)) * oobsize)) {
+-		printk(KERN_ERR "onenand_read_oob_nolock: Attempted to read beyond end of device\n");
+-		return -EINVAL;
+-	}
+-
+-	stats = mtd->ecc_stats;
+-
+-	while (read < len) {
+-		thislen = oobsize - column;
+-		thislen = min_t(int, thislen, len);
+-
+-		this->command(mtd, ONENAND_CMD_READOOB, from, mtd->oobsize);
+-
+-		onenand_update_bufferram(mtd, from, 0);
+-
+-		ret = this->wait(mtd, FL_READING);
+-		if (ret && ret != -EBADMSG) {
+-			printk(KERN_ERR "onenand_read_oob_nolock: read failed = 0x%x\n", ret);
+-			break;
+-		}
+-
+-		if (mode == MTD_OOB_AUTO)
+-			onenand_transfer_auto_oob(mtd, buf, column, thislen);
+-		else
+-			this->read_bufferram(mtd, ONENAND_SPARERAM, buf, column, thislen);
+-
+-		read += thislen;
+-
+-		if (read == len)
+-			break;
+-
+-		buf += thislen;
+-
+-		/* Read more? */
+-		if (read < len) {
+-			/* Page size */
+-			from += mtd->writesize;
+-			column = 0;
+-		}
+-	}
+-
+-	ops->oobretlen = read;
+-
+-	if (ret)
+-		return ret;
+-
+-	if (mtd->ecc_stats.failed - stats.failed)
+-		return -EBADMSG;
+-
+-	return 0;
++	*retlen = read;
++	return ret;
+ }
+ 
+ /**
+@@ -813,126 +683,36 @@ static int onenand_read_oob_nolock(struct mtd_info *mtd, loff_t from,
+ int onenand_read(struct mtd_info *mtd, loff_t from, size_t len,
+ 		 size_t * retlen, u_char * buf)
+ {
+-	struct mtd_oob_ops ops = {
+-		.len    = len,
+-		.ooblen = 0,
+-		.datbuf = buf,
+-		.oobbuf = NULL,
+-	};
+-	int ret;
+-
+-	onenand_get_device(mtd, FL_READING);
+-	ret = onenand_read_ops_nolock(mtd, from, &ops);
+-	onenand_release_device(mtd);
+-
+-	*retlen = ops.retlen;
+-	return ret;
++	return onenand_read_ecc(mtd, from, len, retlen, buf, NULL, NULL);
+ }
+ 
+ /**
+  * onenand_read_oob - [MTD Interface] OneNAND read out-of-band
+  * @param mtd		MTD device structure
+  * @param from		offset to read from
+- * @param ops		oob operations description structure
++ * @param mtd_oob_ops	OOB operation parameters
+  *
+- * OneNAND main and/or out-of-band
++ * OneNAND read out-of-band data from the spare area
+  */
+ int onenand_read_oob(struct mtd_info *mtd, loff_t from,
+-			struct mtd_oob_ops *ops)
+-{
+-	int ret;
+-
+-	switch (ops->mode) {
+-	case MTD_OOB_PLACE:
+-	case MTD_OOB_AUTO:
+-		break;
+-	case MTD_OOB_RAW:
+-		/* Not implemented yet */
+-	default:
+-		return -EINVAL;
+-	}
+-
+-	onenand_get_device(mtd, FL_READING);
+-	if (ops->datbuf)
+-		ret = onenand_read_ops_nolock(mtd, from, ops);
+-	else
+-		ret = onenand_read_oob_nolock(mtd, from, ops);
+-	onenand_release_device(mtd);
+-
+-	return ret;
+-}
+-
+-/**
+- * onenand_bbt_wait - [DEFAULT] wait until the command is done
+- * @param mtd		MTD device structure
+- * @param state		state to select the max. timeout value
+- *
+- * Wait for command done.
+- */
+-static int onenand_bbt_wait(struct mtd_info *mtd, int state)
+-{
+-	struct onenand_chip *this = mtd->priv;
+-	unsigned int flags = ONENAND_INT_MASTER;
+-	unsigned int interrupt;
+-	unsigned int ctrl;
+-
+-	while (1) {
+-		interrupt = this->read_word(this->base + ONENAND_REG_INTERRUPT);
+-		if (interrupt & flags)
+-			break;
+-	}
+-
+-	/* To get correct interrupt status in timeout case */
+-	interrupt = this->read_word(this->base + ONENAND_REG_INTERRUPT);
+-	ctrl = this->read_word(this->base + ONENAND_REG_CTRL_STATUS);
+-
+-	/* Initial bad block case: 0x2400 or 0x0400 */
+-	if (ctrl & ONENAND_CTRL_ERROR) {
+-		printk(KERN_DEBUG "onenand_bbt_wait: controller error = 0x%04x\n", ctrl);
+-		return ONENAND_BBT_READ_ERROR;
+-	}
+-
+-	if (interrupt & ONENAND_INT_READ) {
+-		int ecc = this->read_word(this->base + ONENAND_REG_ECC_STATUS);
+-		if (ecc & ONENAND_ECC_2BIT_ALL)
+-			return ONENAND_BBT_READ_ERROR;
+-	} else {
+-		printk(KERN_ERR "onenand_bbt_wait: read timeout!"
+-				"ctrl=0x%04x intr=0x%04x\n", ctrl, interrupt);
+-		return ONENAND_BBT_READ_FATAL_ERROR;
+-	}
+-
+-	return 0;
+-}
+-
+-/**
+- * onenand_bbt_read_oob - [MTD Interface] OneNAND read out-of-band for bbt scan
+- * @param mtd		MTD device structure
+- * @param from		offset to read from
+- * @param ops		oob operation description structure
+- *
+- * OneNAND read out-of-band data from the spare area for bbt scan
+- */
+-int onenand_bbt_read_oob(struct mtd_info *mtd, loff_t from,
+-		struct mtd_oob_ops *ops)
++			struct mtd_oob_ops *oob_ops)
+ {
+ 	struct onenand_chip *this = mtd->priv;
+ 	int read = 0, thislen, column;
+-	int ret = 0;
+-	size_t len = ops->ooblen;
+-	u_char *buf = ops->oobbuf;
++	int ret = 0, len = oob_ops->ooblen;
+ 
+-	MTDDEBUG(MTD_DEBUG_LEVEL3,
+-		"onenand_bbt_read_oob: from = 0x%08x, len = %zi\n",
+-		(unsigned int) from, len);
++	MTDDEBUG(MTD_DEBUG_LEVEL3, "onenand_read_oob: "
++		  "from = 0x%08x, len = %i\n",
++		  (unsigned int)from, (int)len);
+ 
+-	/* Initialize return value */
+-	ops->oobretlen = 0;
++	/* Initialize return length value */
++	oob_ops->oobretlen = 0;
+ 
+ 	/* Do not allow reads past end of device */
+ 	if (unlikely((from + len) > mtd->size)) {
+-		printk(KERN_ERR "onenand_bbt_read_oob: Attempt read beyond end of device\n");
+-		return ONENAND_BBT_READ_FATAL_ERROR;
++		MTDDEBUG(MTD_DEBUG_LEVEL0, "onenand_read_oob: "
++			  "Attempt read beyond end of device\n");
++		return -EINVAL;
+ 	}
+ 
+ 	/* Grab the lock and see if the device is available */
+@@ -941,7 +721,6 @@ int onenand_bbt_read_oob(struct mtd_info *mtd, loff_t from,
+ 	column = from & (mtd->oobsize - 1);
+ 
+ 	while (read < len) {
+-
+ 		thislen = mtd->oobsize - column;
+ 		thislen = min_t(int, thislen, len);
+ 
+@@ -949,21 +728,27 @@ int onenand_bbt_read_oob(struct mtd_info *mtd, loff_t from,
+ 
+ 		onenand_update_bufferram(mtd, from, 0);
+ 
+-		ret = onenand_bbt_wait(mtd, FL_READING);
+-		if (ret)
+-			break;
++		ret = this->wait(mtd, FL_READING);
++		/* First copy data and check return value for ECC handling */
++
++		this->read_bufferram(mtd, ONENAND_SPARERAM, oob_ops->oobbuf,
++					column, thislen);
+ 
+-		this->read_bufferram(mtd, ONENAND_SPARERAM, buf, column, thislen);
+ 		read += thislen;
+ 		if (read == len)
+ 			break;
+ 
+-		buf += thislen;
++		if (ret) {
++			MTDDEBUG(MTD_DEBUG_LEVEL0,
++				  "onenand_read_oob: read failed = %d\n", ret);
++			break;
++		}
+ 
++		oob_ops->oobbuf += thislen;
+ 		/* Read more? */
+ 		if (read < len) {
+-			/* Update Page size */
+-			from += this->writesize;
++			/* Page size */
++			from += mtd->writesize;
+ 			column = 0;
+ 		}
+ 	}
+@@ -971,425 +756,241 @@ int onenand_bbt_read_oob(struct mtd_info *mtd, loff_t from,
+ 	/* Deselect and wake up anyone waiting on the device */
+ 	onenand_release_device(mtd);
+ 
+-	ops->oobretlen = read;
++	oob_ops->oobretlen = read;
+ 	return ret;
+ }
+ 
+-
+ #ifdef CONFIG_MTD_ONENAND_VERIFY_WRITE
+ /**
+- * onenand_verify_oob - [GENERIC] verify the oob contents after a write
+- * @param mtd           MTD device structure
+- * @param buf           the databuffer to verify
+- * @param to            offset to read from
+- */
+-static int onenand_verify_oob(struct mtd_info *mtd, const u_char *buf, loff_t to)
+-{
+-	struct onenand_chip *this = mtd->priv;
+-	u_char *oob_buf = this->oob_buf;
+-	int status, i;
+-
+-	this->command(mtd, ONENAND_CMD_READOOB, to, mtd->oobsize);
+-	onenand_update_bufferram(mtd, to, 0);
+-	status = this->wait(mtd, FL_READING);
+-	if (status)
+-		return status;
+-
+-	this->read_bufferram(mtd, ONENAND_SPARERAM, oob_buf, 0, mtd->oobsize);
+-	for (i = 0; i < mtd->oobsize; i++)
+-		if (buf[i] != 0xFF && buf[i] != oob_buf[i])
+-			return -EBADMSG;
+-
+-	return 0;
+-}
+-
+-/**
+- * onenand_verify - [GENERIC] verify the chip contents after a write
+- * @param mtd          MTD device structure
+- * @param buf          the databuffer to verify
+- * @param addr         offset to read from
+- * @param len          number of bytes to read and compare
++ * onenand_verify_page - [GENERIC] verify the chip contents after a write
++ * @param mtd		MTD device structure
++ * @param buf		the databuffer to verify
++ *
++ * Check DataRAM area directly
+  */
+-static int onenand_verify(struct mtd_info *mtd, const u_char *buf, loff_t addr, size_t len)
++static int onenand_verify_page(struct mtd_info *mtd, u_char *buf,
++			       loff_t addr)
+ {
+ 	struct onenand_chip *this = mtd->priv;
+-	void __iomem *dataram;
++	void __iomem *dataram0, *dataram1;
+ 	int ret = 0;
+-	int thislen, column;
+-
+-	while (len != 0) {
+-		thislen = min_t(int, this->writesize, len);
+-		column = addr & (this->writesize - 1);
+-		if (column + thislen > this->writesize)
+-			thislen = this->writesize - column;
+-
+-		this->command(mtd, ONENAND_CMD_READ, addr, this->writesize);
+-
+-		onenand_update_bufferram(mtd, addr, 0);
+ 
+-		ret = this->wait(mtd, FL_READING);
+-		if (ret)
+-			return ret;
++	this->command(mtd, ONENAND_CMD_READ, addr, mtd->writesize);
+ 
+-		onenand_update_bufferram(mtd, addr, 1);
++	ret = this->wait(mtd, FL_READING);
++	if (ret)
++		return ret;
+ 
+-		dataram = this->base + ONENAND_DATARAM;
+-		dataram += onenand_bufferram_offset(mtd, ONENAND_DATARAM);
++	onenand_update_bufferram(mtd, addr, 1);
+ 
+-		if (memcmp(buf, dataram + column, thislen))
+-			return -EBADMSG;
++	/* Check, if the two dataram areas are same */
++	dataram0 = this->base + ONENAND_DATARAM;
++	dataram1 = dataram0 + mtd->writesize;
+ 
+-		len -= thislen;
+-		buf += thislen;
+-		addr += thislen;
+-	}
++	if (memcmp(dataram0, dataram1, mtd->writesize))
++		return -EBADMSG;
+ 
+ 	return 0;
+ }
+ #else
+-#define onenand_verify(...)             (0)
+-#define onenand_verify_oob(...)         (0)
++#define onenand_verify_page(...)	(0)
+ #endif
+ 
+ #define NOTALIGNED(x)	((x & (mtd->writesize - 1)) != 0)
+ 
+ /**
+- * onenand_fill_auto_oob - [Internal] oob auto-placement transfer
+- * @param mtd           MTD device structure
+- * @param oob_buf       oob buffer
+- * @param buf           source address
+- * @param column        oob offset to write to
+- * @param thislen       oob length to write
+- */
+-static int onenand_fill_auto_oob(struct mtd_info *mtd, u_char *oob_buf,
+-		const u_char *buf, int column, int thislen)
+-{
+-	struct onenand_chip *this = mtd->priv;
+-	struct nand_oobfree *free;
+-	int writecol = column;
+-	int writeend = column + thislen;
+-	int lastgap = 0;
+-	unsigned int i;
+-
+-	free = this->ecclayout->oobfree;
+-	for (i = 0; i < MTD_MAX_OOBFREE_ENTRIES && free->length; i++, free++) {
+-		if (writecol >= lastgap)
+-			writecol += free->offset - lastgap;
+-		if (writeend >= lastgap)
+-			writeend += free->offset - lastgap;
+-		lastgap = free->offset + free->length;
+-	}
+-	free = this->ecclayout->oobfree;
+-	for (i = 0; i < MTD_MAX_OOBFREE_ENTRIES && free->length; i++, free++) {
+-		int free_end = free->offset + free->length;
+-		if (free->offset < writeend && free_end > writecol) {
+-			int st = max_t(int,free->offset,writecol);
+-			int ed = min_t(int,free_end,writeend);
+-			int n = ed - st;
+-			memcpy(oob_buf + st, buf, n);
+-			buf += n;
+-		} else if (column == 0)
+-			break;
+-	}
+-	return 0;
+-}
+-
+-/**
+- * onenand_write_ops_nolock - [OneNAND Interface] write main and/or out-of-band
+- * @param mtd           MTD device structure
+- * @param to            offset to write to
+- * @param ops           oob operation description structure
++ * onenand_write_ecc - [MTD Interface] OneNAND write with ECC
++ * @param mtd		MTD device structure
++ * @param to		offset to write to
++ * @param len		number of bytes to write
++ * @param retlen	pointer to variable to store the number of written bytes
++ * @param buf		the data to write
++ * @param eccbuf	filesystem supplied oob data buffer
++ * @param oobsel	oob selection structure
+  *
+- * Write main and/or oob with ECC
++ * OneNAND write with ECC
+  */
+-static int onenand_write_ops_nolock(struct mtd_info *mtd, loff_t to,
+-		struct mtd_oob_ops *ops)
++static int onenand_write_ecc(struct mtd_info *mtd, loff_t to, size_t len,
++			     size_t *retlen, const u_char *buf,
++			     u_char *eccbuf, struct nand_oobinfo *oobsel)
+ {
+ 	struct onenand_chip *this = mtd->priv;
+-	int written = 0, column, thislen, subpage;
+-	int oobwritten = 0, oobcolumn, thisooblen, oobsize;
+-	size_t len = ops->len;
+-	size_t ooblen = ops->ooblen;
+-	const u_char *buf = ops->datbuf;
+-	const u_char *oob = ops->oobbuf;
+-	u_char *oobbuf;
++	int written = 0;
+ 	int ret = 0;
+ 
+-	MTDDEBUG(MTD_DEBUG_LEVEL3,
+-		"onenand_write_ops_nolock: to = 0x%08x, len = %i\n",
+-		(unsigned int) to, (int) len);
++	MTDDEBUG(MTD_DEBUG_LEVEL3, "onenand_write_ecc: "
++		  "to = 0x%08x, len = %i\n",
++		  (unsigned int)to, (int)len);
+ 
+ 	/* Initialize retlen, in case of early exit */
+-	ops->retlen = 0;
+-	ops->oobretlen = 0;
++	*retlen = 0;
+ 
+ 	/* Do not allow writes past end of device */
+ 	if (unlikely((to + len) > mtd->size)) {
+-		printk(KERN_ERR "onenand_write_ops_nolock: Attempt write to past end of device\n");
++		MTDDEBUG(MTD_DEBUG_LEVEL0, "onenand_write_ecc: "
++			  "Attempt write to past end of device\n");
+ 		return -EINVAL;
+ 	}
+ 
+ 	/* Reject writes, which are not page aligned */
+-	if (unlikely(NOTALIGNED(to) || NOTALIGNED(len))) {
+-		printk(KERN_ERR "onenand_write_ops_nolock: Attempt to write not page aligned data\n");
++	if (unlikely(NOTALIGNED(to)) || unlikely(NOTALIGNED(len))) {
++		MTDDEBUG(MTD_DEBUG_LEVEL0, "onenand_write_ecc: "
++			  "Attempt to write not page aligned data\n");
+ 		return -EINVAL;
+ 	}
+ 
+-	if (ops->mode == MTD_OOB_AUTO)
+-		oobsize = this->ecclayout->oobavail;
+-	else
+-		oobsize = mtd->oobsize;
+-
+-	oobcolumn = to & (mtd->oobsize - 1);
++	if (unlikely(NOTALIGNED(len))) {
++		MTDDEBUG(MTD_DEBUG_LEVEL0, "onenand_write_ecc: \
++			Attempt to write not page aligned size\n");
++		return -EINVAL;
++	}
+ 
+-	column = to & (mtd->writesize - 1);
++	/* Grab the lock and see if the device is available */
++	onenand_get_device(mtd, FL_WRITING);
+ 
+ 	/* Loop until all data write */
+ 	while (written < len) {
+-		u_char *wbuf = (u_char *) buf;
+-
+-		thislen = min_t(int, mtd->writesize - column, len - written);
+-		thisooblen = min_t(int, oobsize - oobcolumn, ooblen - oobwritten);
++		int thislen = min_t(int, mtd->writesize, len - written);
+ 
+-		this->command(mtd, ONENAND_CMD_BUFFERRAM, to, thislen);
+-
+-		/* Partial page write */
+-		subpage = thislen < mtd->writesize;
+-		if (subpage) {
+-			memset(this->page_buf, 0xff, mtd->writesize);
+-			memcpy(this->page_buf + column, buf, thislen);
+-			wbuf = this->page_buf;
++		if (onenand_block_isbad(mtd, to) > 0) {
++			printf("onenand_write_ecc \
++				detected bad block  @0x%x\n", (int)to);
++			to += mtd->erasesize;
++			continue;
+ 		}
++		this->command(mtd, ONENAND_CMD_BUFFERRAM, to, mtd->writesize);
+ 
+-		this->write_bufferram(mtd, ONENAND_DATARAM, wbuf, 0, mtd->writesize);
+-
+-		if (oob) {
+-			oobbuf = this->oob_buf;
+-
+-			/* We send data to spare ram with oobsize
+-			 *                          * to prevent byte access */
+-			memset(oobbuf, 0xff, mtd->oobsize);
+-			if (ops->mode == MTD_OOB_AUTO)
+-				onenand_fill_auto_oob(mtd, oobbuf, oob, oobcolumn, thisooblen);
+-			else
+-				memcpy(oobbuf + oobcolumn, oob, thisooblen);
+-
+-			oobwritten += thisooblen;
+-			oob += thisooblen;
+-			oobcolumn = 0;
+-		} else
+-			oobbuf = (u_char *) ffchars;
+-
+-		this->write_bufferram(mtd, ONENAND_SPARERAM, oobbuf, 0, mtd->oobsize);
++		this->write_bufferram(mtd, ONENAND_DATARAM, buf, 0, thislen);
++		this->write_bufferram(mtd, ONENAND_SPARERAM, ffchars, 0,
++				      mtd->oobsize);
+ 
+ 		this->command(mtd, ONENAND_CMD_PROG, to, mtd->writesize);
+ 
+-		ret = this->wait(mtd, FL_WRITING);
+-
+-		/* In partial page write we don't update bufferram */
+-		onenand_update_bufferram(mtd, to, !ret && !subpage);
+-		if (ONENAND_IS_2PLANE(this)) {
+-			ONENAND_SET_BUFFERRAM1(this);
+-			onenand_update_bufferram(mtd, to + this->writesize, !ret && !subpage);
+-		}
++		onenand_update_bufferram(mtd, to, 1);
+ 
++		ret = this->wait(mtd, FL_WRITING);
+ 		if (ret) {
+-			printk(KERN_ERR "onenand_write_ops_nolock: write filaed %d\n", ret);
+-			break;
++			printf("onenand_write_ecc: write failed ");
++			printf("block @ 0x%x is bad\n", (int) to);
++			onenand_block_markbad(mtd, to);
++			goto out;
+ 		}
+ 
++		written += thislen;
++
+ 		/* Only check verify write turn on */
+-		ret = onenand_verify(mtd, buf, to, thislen);
++		ret = onenand_verify_page(mtd, (u_char *) buf, to);
+ 		if (ret) {
+-			printk(KERN_ERR "onenand_write_ops_nolock: verify failed %d\n", ret);
+-			break;
++			printf("onenand_write_ecc: verify failed ");
++			printf("block @ 0x%x is bad\n", (int)to);
++			onenand_block_markbad(mtd, to);
++			goto out;
+ 		}
+ 
+-		written += thislen;
+-
+ 		if (written == len)
+ 			break;
+ 
+-		column = 0;
+ 		to += thislen;
+ 		buf += thislen;
+ 	}
+ 
+-	ops->retlen = written;
++out:
++	/* Deselect and wake up anyone waiting on the device */
++	onenand_release_device(mtd);
++
++	*retlen = written;
+ 
+ 	return ret;
+ }
+ 
+ /**
+- * onenand_write_oob_nolock - [Internal] OneNAND write out-of-band
+- * @param mtd           MTD device structure
+- * @param to            offset to write to
+- * @param len           number of bytes to write
+- * @param retlen        pointer to variable to store the number of written bytes
+- * @param buf           the data to write
+- * @param mode          operation mode
++ * onenand_write - [MTD Interface] compability function for onenand_write_ecc
++ * @param mtd		MTD device structure
++ * @param to		offset to write to
++ * @param len		number of bytes to write
++ * @param retlen	pointer to variable to store the number of written bytes
++ * @param buf		the data to write
++ *
++ * This function simply calls onenand_write_ecc
++ * with oob buffer and oobsel = NULL
++ */
++int onenand_write(struct mtd_info *mtd, loff_t to, size_t len,
++		  size_t *retlen, const u_char *buf)
++{
++	return onenand_write_ecc(mtd, to, len, retlen, buf, NULL, NULL);
++}
++
++/**
++ * onenand_write_oob - [MTD Interface] OneNAND write out-of-band
++ * @param mtd		MTD device structure
++ * @param to		offset to write to
++ * @param len		number of bytes to write
++ * @param retlen	pointer to variable to store the number of written bytes
++ * @param buf		the data to write
+  *
+  * OneNAND write out-of-band
+  */
+-static int onenand_write_oob_nolock(struct mtd_info *mtd, loff_t to,
+-		struct mtd_oob_ops *ops)
++int onenand_write_oob(struct mtd_info *mtd, loff_t to,
++			struct mtd_oob_ops *oob_ops)
+ {
+ 	struct onenand_chip *this = mtd->priv;
+-	int column, ret = 0, oobsize;
++	int column, status;
+ 	int written = 0;
+-	u_char *oobbuf;
+-	size_t len = ops->ooblen;
+-	const u_char *buf = ops->oobbuf;
+-	mtd_oob_mode_t mode = ops->mode;
++	size_t len = oob_ops->ooblen;
+ 
+-	to += ops->ooboffs;
+-
+-	MTDDEBUG(MTD_DEBUG_LEVEL3,
+-		"onenand_write_oob_nolock: to = 0x%08x, len = %i\n",
+-		(unsigned int) to, (int) len);
++	MTDDEBUG(MTD_DEBUG_LEVEL3, "onenand_write_oob: "
++		  "to = 0x%08x, len = %i\n",
++		  (unsigned int)to, (int)len);
+ 
+ 	/* Initialize retlen, in case of early exit */
+-	ops->oobretlen = 0;
+-
+-	if (mode == MTD_OOB_AUTO)
+-		oobsize = this->ecclayout->oobavail;
+-	else
+-		oobsize = mtd->oobsize;
++	oob_ops->oobretlen = 0;
+ 
+-	column = to & (mtd->oobsize - 1);
+-
+-	if (unlikely(column >= oobsize)) {
+-		printk(KERN_ERR "onenand_write_oob_nolock: Attempted to start write outside oob\n");
+-		return -EINVAL;
+-	}
+-
+-	/* For compatibility with NAND: Do not allow write past end of page */
+-	if (unlikely(column + len > oobsize)) {
+-		printk(KERN_ERR "onenand_write_oob_nolock: "
+-				"Attempt to write past end of page\n");
+-		return -EINVAL;
+-	}
+-
+-	/* Do not allow reads past end of device */
+-	if (unlikely(to >= mtd->size ||
+-				column + len > ((mtd->size >> this->page_shift) -
+-					(to >> this->page_shift)) * oobsize)) {
+-		printk(KERN_ERR "onenand_write_oob_nolock: Attempted to write past end of device\n");
++	/* Do not allow writes past end of device */
++	if (unlikely((to + len) > mtd->size)) {
++		MTDDEBUG(MTD_DEBUG_LEVEL0, "onenand_write_oob: "
++			  "Attempt write to past end of device\n");
+ 		return -EINVAL;
+ 	}
+ 
+-	oobbuf = this->oob_buf;
++	/* Grab the lock and see if the device is available */
++	onenand_get_device(mtd, FL_WRITING);
+ 
+ 	/* Loop until all data write */
+ 	while (written < len) {
+-		int thislen = min_t(int, oobsize, len - written);
++		int thislen = min_t(int, mtd->oobsize, len - written);
++
++		column = to & (mtd->oobsize - 1);
+ 
+ 		this->command(mtd, ONENAND_CMD_BUFFERRAM, to, mtd->oobsize);
+ 
+-		/* We send data to spare ram with oobsize
+-		 * to prevent byte access */
+-		memset(oobbuf, 0xff, mtd->oobsize);
+-		if (mode == MTD_OOB_AUTO)
+-			onenand_fill_auto_oob(mtd, oobbuf, buf, column, thislen);
+-		else
+-			memcpy(oobbuf + column, buf, thislen);
+-		this->write_bufferram(mtd, ONENAND_SPARERAM, oobbuf, 0, mtd->oobsize);
++		this->write_bufferram(mtd, ONENAND_SPARERAM, ffchars, 0,
++				      mtd->oobsize);
++		this->write_bufferram(mtd, ONENAND_SPARERAM, oob_ops->oobbuf,
++					column, thislen);
+ 
+ 		this->command(mtd, ONENAND_CMD_PROGOOB, to, mtd->oobsize);
+ 
+ 		onenand_update_bufferram(mtd, to, 0);
+-		if (ONENAND_IS_2PLANE(this)) {
+-			ONENAND_SET_BUFFERRAM1(this);
+-			onenand_update_bufferram(mtd, to + this->writesize, 0);
+-		}
+-
+-		ret = this->wait(mtd, FL_WRITING);
+-		if (ret) {
+-			printk(KERN_ERR "onenand_write_oob_nolock: write failed %d\n", ret);
+-			break;
+-		}
+ 
+-		ret = onenand_verify_oob(mtd, oobbuf, to);
+-		if (ret) {
+-			printk(KERN_ERR "onenand_write_oob_nolock: verify failed %d\n", ret);
+-			break;
+-		}
++		status = this->wait(mtd, FL_WRITING);
++		if (status)
++			goto out;
+ 
+ 		written += thislen;
+ 		if (written == len)
+ 			break;
+ 
+-		to += mtd->writesize;
+-		buf += thislen;
+-		column = 0;
+-	}
+-
+-	ops->oobretlen = written;
+-
+-	return ret;
+-}
+-
+-/**
+- * onenand_write - [MTD Interface] compability function for onenand_write_ecc
+- * @param mtd		MTD device structure
+- * @param to		offset to write to
+- * @param len		number of bytes to write
+- * @param retlen	pointer to variable to store the number of written bytes
+- * @param buf		the data to write
+- *
+- * Write with ECC
+- */
+-int onenand_write(struct mtd_info *mtd, loff_t to, size_t len,
+-		  size_t * retlen, const u_char * buf)
+-{
+-	struct mtd_oob_ops ops = {
+-		.len    = len,
+-		.ooblen = 0,
+-		.datbuf = (u_char *) buf,
+-		.oobbuf = NULL,
+-	};
+-	int ret;
+-
+-	onenand_get_device(mtd, FL_WRITING);
+-	ret = onenand_write_ops_nolock(mtd, to, &ops);
+-	onenand_release_device(mtd);
+-
+-	*retlen = ops.retlen;
+-	return ret;
+-}
+-
+-/**
+- * onenand_write_oob - [MTD Interface] OneNAND write out-of-band
+- * @param mtd		MTD device structure
+- * @param to		offset to write to
+- * @param ops		oob operation description structure
+- *
+- * OneNAND write main and/or out-of-band
+- */
+-int onenand_write_oob(struct mtd_info *mtd, loff_t to,
+-			struct mtd_oob_ops *ops)
+-{
+-	int ret;
+-
+-	switch (ops->mode) {
+-	case MTD_OOB_PLACE:
+-	case MTD_OOB_AUTO:
+-		break;
+-	case MTD_OOB_RAW:
+-		/* Not implemented yet */
+-	default:
+-		return -EINVAL;
++		to += thislen;
++		oob_ops->oobbuf += thislen;
+ 	}
+ 
+-	onenand_get_device(mtd, FL_WRITING);
+-	if (ops->datbuf)
+-		ret = onenand_write_ops_nolock(mtd, to, ops);
+-	else
+-		ret = onenand_write_oob_nolock(mtd, to, ops);
++out:
++	/* Deselect and wake up anyone waiting on the device */
+ 	onenand_release_device(mtd);
+ 
+-	return ret;
++	oob_ops->retlen = written;
+ 
++	return 0;
+ }
+ 
+ /**
+@@ -1426,30 +1027,29 @@ int onenand_erase(struct mtd_info *mtd, struct erase_info *instr)
+ 	int len;
+ 	int ret = 0;
+ 
+-	MTDDEBUG (MTD_DEBUG_LEVEL3,
+-		 "onenand_erase: start = 0x%08x, len = %i\n",
+-		 (unsigned int)instr->addr, (unsigned int)ins tr->len);
++	MTDDEBUG(MTD_DEBUG_LEVEL3, "onenand_erase: start = 0x%08x, len = %i\n",
++		  (unsigned int)instr->addr, (unsigned int)instr->len);
+ 
+ 	block_size = (1 << this->erase_shift);
+ 
+ 	/* Start address must align on block boundary */
+ 	if (unlikely(instr->addr & (block_size - 1))) {
+-		MTDDEBUG (MTD_DEBUG_LEVEL0,
+-			 "onenand_erase: Unaligned address\n");
++		MTDDEBUG(MTD_DEBUG_LEVEL0,
++			  "onenand_erase: Unaligned address\n");
+ 		return -EINVAL;
+ 	}
+ 
+ 	/* Length must align on block boundary */
+ 	if (unlikely(instr->len & (block_size - 1))) {
+-		MTDDEBUG (MTD_DEBUG_LEVEL0,
+-			 "onenand_erase: Length not block aligned\n");
++		MTDDEBUG(MTD_DEBUG_LEVEL0,
++			  "onenand_erase: Length not block aligned\n");
+ 		return -EINVAL;
+ 	}
+ 
+ 	/* Do not allow erase past end of device */
+ 	if (unlikely((instr->len + instr->addr) > mtd->size)) {
+ 		MTDDEBUG (MTD_DEBUG_LEVEL0,
+-			 "onenand_erase: Erase past end of device\n");
++			  "onenand_erase: Erase past end of device\n");
+ 		return -EINVAL;
+ 	}
+ 
+@@ -1469,8 +1069,31 @@ int onenand_erase(struct mtd_info *mtd, struct erase_info *instr)
+ 		/* TODO Check badblock */
+ 
+ 		this->command(mtd, ONENAND_CMD_ERASE, addr, block_size);
+-
+-		onenand_invalidate_bufferram(mtd, addr, block_size);
++		if (instr->priv == ONENAND_SCRUB) {
++			if (onenand_block_isbad(mtd, addr) != 0x3) {
++			/* erase user marked bad blocks only */
++			this->command(mtd, ONENAND_CMD_ERASE, addr, block_size);
++			} else {
++			/* skip the factory marked bad blocks */
++			printf("onenand_erase:\
++			not erasing factory bad block @0x%x\n", (int)addr);
++			len -= block_size;
++			addr += block_size;
++			continue;
++			}
++		} else {
++			if (onenand_block_isbad(mtd, addr) == 0) {
++			/* block is not a known bad block. Try to erase it */
++			this->command(mtd, ONENAND_CMD_ERASE, addr, block_size);
++			} else {
++			/* skip the user and factory bad blocks */
++			printf("onenand_erase:\
++				not erasing bad block @0x%x\n", (int)addr);
++			len -= block_size;
++			addr += block_size;
++			continue;
++			}
++		}
+ 
+ 		ret = this->wait(mtd, FL_ERASING);
+ 		/* Check, if it is write protected */
+@@ -1757,8 +1380,6 @@ static int onenand_probe(struct mtd_info *mtd)
+ 	this->page_shift = ffs(mtd->writesize) - 1;
+ 	this->ppb_shift = (this->erase_shift - this->page_shift);
+ 	this->page_mask = (mtd->erasesize / mtd->writesize) - 1;
+-	/* It's real page size */
+-	this->writesize = mtd->writesize;
+ 
+ 	/* REVIST: Multichip handling */
+ 
+@@ -1819,6 +1440,9 @@ int onenand_scan(struct mtd_info *mtd, int maxchips)
+ 	if (!this->write_bufferram)
+ 		this->write_bufferram = onenand_write_bufferram;
+ 
++	if (!this->block_markbad)
++		this->block_markbad = onenand_default_block_markbad;
++
+ 	if (onenand_probe(mtd))
+ 		return -ENXIO;
+ 
+@@ -1828,28 +1452,6 @@ int onenand_scan(struct mtd_info *mtd, int maxchips)
+ 		this->read_bufferram = onenand_sync_read_bufferram;
+ 	}
+ 
+-	/* Allocate buffers, if necessary */
+-	if (!this->page_buf) {
+-		this->page_buf = kzalloc(mtd->writesize, GFP_KERNEL);
+-		if (!this->page_buf) {
+-			printk(KERN_ERR "onenand_scan(): Can't allocate page_buf\n");
+-			return -ENOMEM;
+-		}
+-		this->options |= ONENAND_PAGEBUF_ALLOC;
+-	}
+-	if (!this->oob_buf) {
+-		this->oob_buf = kzalloc(mtd->oobsize, GFP_KERNEL);
+-		if (!this->oob_buf) {
+-			printk(KERN_ERR "onenand_scan: Can't allocate oob_buf\n");
+-			if (this->options & ONENAND_PAGEBUF_ALLOC) {
+-				this->options &= ~ONENAND_PAGEBUF_ALLOC;
+-				kfree(this->page_buf);
+-			}
+-			return -ENOMEM;
+-		}
+-		this->options |= ONENAND_OOBBUF_ALLOC;
+-	}
+-
+ 	onenand_unlock(mtd, 0, mtd->size);
+ 
+ 	return onenand_default_bbt(mtd);
+diff --git a/drivers/mtd/onenand/onenand_bbt.c b/drivers/mtd/onenand/onenand_bbt.c
+index dde11ae..da8f7c9 100644
+--- a/drivers/mtd/onenand/onenand_bbt.c
++++ b/drivers/mtd/onenand/onenand_bbt.c
+@@ -68,7 +68,7 @@ static int create_bbt(struct mtd_info *mtd, uint8_t * buf,
+ 	int startblock;
+ 	loff_t from;
+ 	size_t readlen, ooblen;
+-	struct mtd_oob_ops ops;
++	struct mtd_oob_ops oob_ops;
+ 
+ 	printk(KERN_INFO "Scanning device for bad blocks\n");
+ 
+@@ -86,26 +86,28 @@ static int create_bbt(struct mtd_info *mtd, uint8_t * buf,
+ 	startblock = 0;
+ 	from = 0;
+ 
+-	ops.mode = MTD_OOB_PLACE;
+-	ops.ooblen = readlen;
+-	ops.oobbuf = buf;
+-	ops.len = ops.ooboffs = ops.retlen = ops.oobretlen = 0;
+-
+ 	for (i = startblock; i < numblocks;) {
+ 		int ret;
+ 
+ 		for (j = 0; j < len; j++) {
+ 			/* No need to read pages fully,
+ 			 * just read required OOB bytes */
+-			ret = onenand_bbt_read_oob(mtd,
++			oob_ops.mode = MTD_OOB_AUTO;
++			oob_ops.len = readlen;
++			oob_ops.ooblen = readlen;
++			oob_ops.datbuf = NULL;
++			oob_ops.oobbuf = &buf[0];
++
++			ret = onenand_read_oob(mtd,
+ 					     from + j * mtd->writesize +
+-					     bd->offs, &ops);
++					     bd->offs, &oob_ops);
+ 
+-			/* If it is a initial bad block, just ignore it */
+-                        if (ret == ONENAND_BBT_READ_FATAL_ERROR)
+-                                return -EIO;
++			if (ret && ret != -EAGAIN) {
++				printk(KERN_WARNING "ret = %d\n", ret);
++				return ret;
++			}
+ 
+-			if (ret || check_short_pattern
++			if (check_short_pattern
+ 			    (&buf[j * scanlen], scanlen, mtd->writesize, bd)) {
+ 				bbm->bbt[i >> 3] |= 0x03 << (i & 0x6);
+ 				printk(KERN_WARNING
+diff --git a/include/asm-arm/arch-omap3/mux.h b/include/asm-arm/arch-omap3/mux.h
+index f2bd63e..c7926a7 100644
+--- a/include/asm-arm/arch-omap3/mux.h
++++ b/include/asm-arm/arch-omap3/mux.h
+@@ -31,12 +31,20 @@
+  * M0   - Mode 0
+  */
+ 
++#define OFF_PD          (1 << 12)
++#define OFF_PU          (3 << 12)
++#define OFF_OUT_PTD     (0 << 11)
++#define OFF_OUT_PTU     (1 << 11)
++#define OFF_IN          (1 << 10)
++#define OFF_OUT         (0 << 10)
++#define OFF_EN          (1 << 9)
++
+ #define  IEN	(1 << 8)
+ 
+ #define  IDIS	(0 << 8)
+ #define  PTU	(1 << 4)
+ #define  PTD	(0 << 4)
+-#define  EN		(1 << 3)
++#define  EN	(1 << 3)
+ #define  DIS	(0 << 3)
+ 
+ #define  M0	0
+@@ -48,6 +56,18 @@
+ #define  M6	6
+ #define  M7	7
+ 
++#ifdef CONFIG_OFF_PADCONF
++#define OFF_IN_PD       (OFF_PD | OFF_IN | OFF_EN)
++#define OFF_IN_PU       (OFF_PU | OFF_IN | OFF_EN)
++#define OFF_OUT_PD      (OFF_OUT_PTD | OFF_OUT | OFF_EN)
++#define OFF_OUT_PU      (OFF_OUT_PTU | OFF_OUT | OFF_EN)
++#else
++#define OFF_IN_PD       0
++#define OFF_IN_PU       0
++#define OFF_OUT_PD      0
++#define OFF_OUT_PU      0
++#endif /* #ifdef CONFIG_OFF_PADCONF */
++
+ /*
+  * To get the actual address the offset has to added
+  * with OMAP34XX_CTRL_BASE to get the actual address
+@@ -419,6 +439,618 @@
+  * M0   - Mode 0
+  * The commented string gives the final mux configuration for that pin
+  */
++
++#define MUX_DEFAULT_EVM()\
++	/*SDRC*/\
++	MUX_VAL(CP(SDRC_D0),        (IEN  | PTD | DIS | M0)) /*SDRC_D0*/\
++	MUX_VAL(CP(SDRC_D1),        (IEN  | PTD | DIS | M0)) /*SDRC_D1*/\
++	MUX_VAL(CP(SDRC_D2),        (IEN  | PTD | DIS | M0)) /*SDRC_D2*/\
++	MUX_VAL(CP(SDRC_D3),        (IEN  | PTD | DIS | M0)) /*SDRC_D3*/\
++	MUX_VAL(CP(SDRC_D4),        (IEN  | PTD | DIS | M0)) /*SDRC_D4*/\
++	MUX_VAL(CP(SDRC_D5),        (IEN  | PTD | DIS | M0)) /*SDRC_D5*/\
++	MUX_VAL(CP(SDRC_D6),        (IEN  | PTD | DIS | M0)) /*SDRC_D6*/\
++	MUX_VAL(CP(SDRC_D7),        (IEN  | PTD | DIS | M0)) /*SDRC_D7*/\
++	MUX_VAL(CP(SDRC_D8),        (IEN  | PTD | DIS | M0)) /*SDRC_D8*/\
++	MUX_VAL(CP(SDRC_D9),        (IEN  | PTD | DIS | M0)) /*SDRC_D9*/\
++	MUX_VAL(CP(SDRC_D10),       (IEN  | PTD | DIS | M0)) /*SDRC_D10*/\
++	MUX_VAL(CP(SDRC_D11),       (IEN  | PTD | DIS | M0)) /*SDRC_D11*/\
++	MUX_VAL(CP(SDRC_D12),       (IEN  | PTD | DIS | M0)) /*SDRC_D12*/\
++	MUX_VAL(CP(SDRC_D13),       (IEN  | PTD | DIS | M0)) /*SDRC_D13*/\
++	MUX_VAL(CP(SDRC_D14),       (IEN  | PTD | DIS | M0)) /*SDRC_D14*/\
++	MUX_VAL(CP(SDRC_D15),       (IEN  | PTD | DIS | M0)) /*SDRC_D15*/\
++	MUX_VAL(CP(SDRC_D16),       (IEN  | PTD | DIS | M0)) /*SDRC_D16*/\
++	MUX_VAL(CP(SDRC_D17),       (IEN  | PTD | DIS | M0)) /*SDRC_D17*/\
++	MUX_VAL(CP(SDRC_D18),       (IEN  | PTD | DIS | M0)) /*SDRC_D18*/\
++	MUX_VAL(CP(SDRC_D19),       (IEN  | PTD | DIS | M0)) /*SDRC_D19*/\
++	MUX_VAL(CP(SDRC_D20),       (IEN  | PTD | DIS | M0)) /*SDRC_D20*/\
++	MUX_VAL(CP(SDRC_D21),       (IEN  | PTD | DIS | M0)) /*SDRC_D21*/\
++	MUX_VAL(CP(SDRC_D22),       (IEN  | PTD | DIS | M0)) /*SDRC_D22*/\
++	MUX_VAL(CP(SDRC_D23),       (IEN  | PTD | DIS | M0)) /*SDRC_D23*/\
++	MUX_VAL(CP(SDRC_D24),       (IEN  | PTD | DIS | M0)) /*SDRC_D24*/\
++	MUX_VAL(CP(SDRC_D25),       (IEN  | PTD | DIS | M0)) /*SDRC_D25*/\
++	MUX_VAL(CP(SDRC_D26),       (IEN  | PTD | DIS | M0)) /*SDRC_D26*/\
++	MUX_VAL(CP(SDRC_D27),       (IEN  | PTD | DIS | M0)) /*SDRC_D27*/\
++	MUX_VAL(CP(SDRC_D28),       (IEN  | PTD | DIS | M0)) /*SDRC_D28*/\
++	MUX_VAL(CP(SDRC_D29),       (IEN  | PTD | DIS | M0)) /*SDRC_D29*/\
++	MUX_VAL(CP(SDRC_D30),       (IEN  | PTD | DIS | M0)) /*SDRC_D30*/\
++	MUX_VAL(CP(SDRC_D31),       (IEN  | PTD | DIS | M0)) /*SDRC_D31*/\
++	MUX_VAL(CP(SDRC_CLK),       (IEN  | PTD | DIS | M0)) /*SDRC_CLK*/\
++	MUX_VAL(CP(SDRC_DQS0),      (IEN  | PTD | DIS | M0)) /*SDRC_DQS0*/\
++	MUX_VAL(CP(SDRC_DQS1),      (IEN  | PTD | DIS | M0)) /*SDRC_DQS1*/\
++	MUX_VAL(CP(SDRC_DQS2),      (IEN  | PTD | DIS | M0)) /*SDRC_DQS2*/\
++	MUX_VAL(CP(SDRC_DQS3),      (IEN  | PTD | DIS | M0)) /*SDRC_DQS3*/\
++	/*GPMC*/\
++	/*GPMC_A1*/\
++	MUX_VAL(CP(GPMC_A1),        (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_A2*/\
++	MUX_VAL(CP(GPMC_A2),        (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_A3*/\
++	MUX_VAL(CP(GPMC_A3),        (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_A4*/\
++	MUX_VAL(CP(GPMC_A4),        (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_A5*/\
++	MUX_VAL(CP(GPMC_A5),        (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_A6*/\
++	MUX_VAL(CP(GPMC_A6),        (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_A7*/\
++	MUX_VAL(CP(GPMC_A7),        (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_A8*/\
++	MUX_VAL(CP(GPMC_A8),        (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_A9*/\
++	MUX_VAL(CP(GPMC_A9),        (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_A10*/\
++	MUX_VAL(CP(GPMC_A10),       (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_D0*/\
++	MUX_VAL(CP(GPMC_D0),        (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D1*/\
++	MUX_VAL(CP(GPMC_D1),        (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D2*/\
++	MUX_VAL(CP(GPMC_D2),        (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D3*/\
++	MUX_VAL(CP(GPMC_D3),        (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D4*/\
++	MUX_VAL(CP(GPMC_D4),        (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D5*/\
++	MUX_VAL(CP(GPMC_D5),        (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D6*/\
++	MUX_VAL(CP(GPMC_D6),        (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D7*/\
++	MUX_VAL(CP(GPMC_D7),        (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D8*/\
++	MUX_VAL(CP(GPMC_D8),        (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D9*/\
++	MUX_VAL(CP(GPMC_D9),        (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D10*/\
++	MUX_VAL(CP(GPMC_D10),       (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D11*/\
++	MUX_VAL(CP(GPMC_D11),       (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D12*/\
++	MUX_VAL(CP(GPMC_D12),       (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D13*/\
++	MUX_VAL(CP(GPMC_D13),       (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D14*/\
++	MUX_VAL(CP(GPMC_D14),       (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_D15*/\
++	MUX_VAL(CP(GPMC_D15),       (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_nCS0*/\
++	MUX_VAL(CP(GPMC_nCS0),      (OFF_OUT_PD | IDIS | PTU | EN  | M0)) \
++	/*GPMC_nCS1*/\
++	MUX_VAL(CP(GPMC_nCS1),      (OFF_OUT_PD | IDIS | PTU | EN  | M0)) \
++	/*GPMC_nCS2*/\
++	MUX_VAL(CP(GPMC_nCS2),      (OFF_OUT_PD | IDIS | PTU | EN  | M0)) \
++	/*GPMC_nCS3*/\
++	MUX_VAL(CP(GPMC_nCS3),      (OFF_OUT_PD | IDIS | PTU | EN  | M0)) \
++	/*GPMC_nCS4*/\
++	MUX_VAL(CP(GPMC_nCS4),      (OFF_IN_PD  | IEN  | PTU | EN   | M0)) \
++	/*GPMC_nCS5*/\
++	MUX_VAL(CP(GPMC_nCS5),      (OFF_OUT_PD | IDIS | PTD | DIS  | M0)) \
++	/*GPMC_nCS6*/\
++	MUX_VAL(CP(GPMC_nCS6),      (OFF_IN_PD  | IEN  | PTD | DIS  | M0)) \
++	/*GPMC_nCS7*/\
++	MUX_VAL(CP(GPMC_nCS7),      (OFF_IN_PD  | IEN  | PTU | EN   | M0)) \
++	/*GPMC_CLK*/\
++	MUX_VAL(CP(GPMC_CLK),       (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_nADV_ALE*/\
++	MUX_VAL(CP(GPMC_nADV_ALE),  (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_nOE*/\
++	MUX_VAL(CP(GPMC_nOE),       (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_nWE*/\
++	MUX_VAL(CP(GPMC_nWE),       (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_nBE0_CLE*/\
++	MUX_VAL(CP(GPMC_nBE0_CLE),  (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPMC_nBE1*/\
++	MUX_VAL(CP(GPMC_nBE1),      (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPMC_nWP*/\
++	MUX_VAL(CP(GPMC_nWP),       (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	 /*GPMC_WAIT0*/\
++	MUX_VAL(CP(GPMC_WAIT0),     (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*GPMC_WAIT1*/\
++	MUX_VAL(CP(GPMC_WAIT1),     (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*GPIO_64 - ETH_nRESET*/\
++	MUX_VAL(CP(GPMC_WAIT2),     (OFF_IN_PD  | IEN  | PTU | EN  | M4)) \
++	/*GPIO_65*/\
++	MUX_VAL(CP(GPMC_WAIT3),     (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*DSS*/\
++	/*DSS_PCLK*/\
++	MUX_VAL(CP(DSS_PCLK),       (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_HSYNC*/\
++	MUX_VAL(CP(DSS_HSYNC),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_VSYNC*/\
++	MUX_VAL(CP(DSS_VSYNC),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_ACBIAS*/\
++	MUX_VAL(CP(DSS_ACBIAS),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA0*/\
++	MUX_VAL(CP(DSS_DATA0),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA1*/\
++	MUX_VAL(CP(DSS_DATA1),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA2*/\
++	MUX_VAL(CP(DSS_DATA2),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA3*/\
++	MUX_VAL(CP(DSS_DATA3),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA4*/\
++	MUX_VAL(CP(DSS_DATA4),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA5*/\
++	MUX_VAL(CP(DSS_DATA5),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA6*/\
++	MUX_VAL(CP(DSS_DATA6),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA7*/\
++	MUX_VAL(CP(DSS_DATA7),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA8*/\
++	MUX_VAL(CP(DSS_DATA8),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA9*/\
++	MUX_VAL(CP(DSS_DATA9),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA10*/\
++	MUX_VAL(CP(DSS_DATA10),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA11*/\
++	MUX_VAL(CP(DSS_DATA11),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA12*/\
++	MUX_VAL(CP(DSS_DATA12),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA13*/\
++	MUX_VAL(CP(DSS_DATA13),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA14*/\
++	MUX_VAL(CP(DSS_DATA14),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA15*/\
++	MUX_VAL(CP(DSS_DATA15),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA16*/\
++	MUX_VAL(CP(DSS_DATA16),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA17*/\
++	MUX_VAL(CP(DSS_DATA17),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA18*/\
++	MUX_VAL(CP(DSS_DATA18),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA19*/\
++	MUX_VAL(CP(DSS_DATA19),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA20*/\
++	MUX_VAL(CP(DSS_DATA20),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA21*/\
++	MUX_VAL(CP(DSS_DATA21),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA22*/\
++	MUX_VAL(CP(DSS_DATA22),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*DSS_DATA23*/\
++	MUX_VAL(CP(DSS_DATA23),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*CAMERA*/\
++	/*CAM_HS */\
++	MUX_VAL(CP(CAM_HS),         (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*CAM_VS */\
++	MUX_VAL(CP(CAM_VS),         (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*CAM_XCLKA*/\
++	MUX_VAL(CP(CAM_XCLKA),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*CAM_PCLK*/\
++	MUX_VAL(CP(CAM_PCLK),       (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*GPIO_98 - CAM_RESET*/\
++	MUX_VAL(CP(CAM_FLD),        (OFF_OUT_PD | IDIS | PTD | DIS | M4)) \
++	/*CAM_D0 */\
++	MUX_VAL(CP(CAM_D0),         (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CAM_D1 */\
++	MUX_VAL(CP(CAM_D1),         (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CAM_D2 */\
++	MUX_VAL(CP(CAM_D2),         (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CAM_D3 */\
++	MUX_VAL(CP(CAM_D3),         (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CAM_D4 */\
++	MUX_VAL(CP(CAM_D4),         (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CAM_D5 */\
++	MUX_VAL(CP(CAM_D5),         (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CAM_D6 */\
++	MUX_VAL(CP(CAM_D6),         (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CAM_D7 */\
++	MUX_VAL(CP(CAM_D7),         (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CAM_D8 */\
++	MUX_VAL(CP(CAM_D8),         (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CAM_D9 */\
++	MUX_VAL(CP(CAM_D9),         (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CAM_D10*/\
++	MUX_VAL(CP(CAM_D10),        (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CAM_D11*/\
++	MUX_VAL(CP(CAM_D11),        (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CAM_XCLKB*/\
++	MUX_VAL(CP(CAM_XCLKB),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*GPIO_167*/\
++	MUX_VAL(CP(CAM_WEN),        (OFF_IN_PD  | IEN  | PTD | DIS | M4)) \
++	/*CAM_STROBE*/\
++	MUX_VAL(CP(CAM_STROBE),     (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*CSI2_DX0*/\
++	MUX_VAL(CP(CSI2_DX0),       (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CSI2_DY0*/\
++	MUX_VAL(CP(CSI2_DY0),       (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CSI2_DX1*/\
++	MUX_VAL(CP(CSI2_DX1),       (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*CSI2_DY1*/\
++	MUX_VAL(CP(CSI2_DY1),       (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*Audio Interface */\
++	/*McBSP2_FSX*/\
++	MUX_VAL(CP(McBSP2_FSX),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*McBSP2_CLKX*/\
++	MUX_VAL(CP(McBSP2_CLKX),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*McBSP2_DR*/\
++	MUX_VAL(CP(McBSP2_DR),      (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*McBSP2_DX*/\
++	MUX_VAL(CP(McBSP2_DX),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*Expansion card  */\
++	/*MMC1_CLK*/\
++	MUX_VAL(CP(MMC1_CLK),       (OFF_OUT_PD | IDIS | PTU | EN  | M0)) \
++	/*MMC1_CMD*/\
++	MUX_VAL(CP(MMC1_CMD),       (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*MMC1_DAT0*/\
++	MUX_VAL(CP(MMC1_DAT0),      (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*MMC1_DAT1*/\
++	MUX_VAL(CP(MMC1_DAT1),      (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*MMC1_DAT2*/\
++	MUX_VAL(CP(MMC1_DAT2),      (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*MMC1_DAT3*/\
++	MUX_VAL(CP(MMC1_DAT3),      (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*MMC1_DAT4*/\
++	MUX_VAL(CP(MMC1_DAT4),      (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*MMC1_DAT5*/\
++	MUX_VAL(CP(MMC1_DAT5),      (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*MMC1_DAT6*/\
++	MUX_VAL(CP(MMC1_DAT6),      (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*MMC1_DAT7*/\
++	MUX_VAL(CP(MMC1_DAT7),      (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*Wireless LAN */\
++	MUX_VAL(CP(MMC2_CLK),       (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*MMC2_CMD*/\
++	MUX_VAL(CP(MMC2_CMD),       (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*MMC2_DAT0*/\
++	MUX_VAL(CP(MMC2_DAT0),      (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*MMC2_DAT1*/\
++	MUX_VAL(CP(MMC2_DAT1),      (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*MMC2_DAT2*/\
++	MUX_VAL(CP(MMC2_DAT2),      (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*MMC2_DAT3*/\
++	MUX_VAL(CP(MMC2_DAT3),      (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*MMC2_DAT4*/\
++	MUX_VAL(CP(MMC2_DAT4),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*MMC2_DAT5*/\
++	MUX_VAL(CP(MMC2_DAT5),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*MMC2_DAT6 */\
++	MUX_VAL(CP(MMC2_DAT6),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*MMC2_DAT7*/\
++	MUX_VAL(CP(MMC2_DAT7),      (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*Bluetooth*/\
++	/*McBSP3_DX*/\
++	MUX_VAL(CP(McBSP3_DX),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*McBSP3_DR*/\
++	MUX_VAL(CP(McBSP3_DR),      (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*McBSP3_CLKX  */\
++	MUX_VAL(CP(McBSP3_CLKX),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*McBSP3_FSX*/\
++	MUX_VAL(CP(McBSP3_FSX),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*UART2_CTS*/\
++	MUX_VAL(CP(UART2_CTS),      (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*UART2_RTS*/\
++	MUX_VAL(CP(UART2_RTS),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*UART2_TX*/\
++	MUX_VAL(CP(UART2_TX),       (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*UART2_RX*/\
++	MUX_VAL(CP(UART2_RX),       (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*Modem Interface */\
++	/*UART1_TX*/\
++	MUX_VAL(CP(UART1_TX),       (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*UART1_RTS*/\
++	MUX_VAL(CP(UART1_RTS),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*UART1_CTS*/\
++	MUX_VAL(CP(UART1_CTS),      (OFF_IN_PD  | IEN  | PTU | DIS | M0)) \
++	/*UART1_RX*/\
++	MUX_VAL(CP(UART1_RX),       (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*GPIO_152 - LCD_INI*/\
++	MUX_VAL(CP(McBSP4_CLKX),    (OFF_OUT_PD | IDIS | PTD | DIS | M4)) \
++	/*GPIO_153 - LCD_ENVDD */\
++	MUX_VAL(CP(McBSP4_DR),      (OFF_OUT_PD | IDIS | PTD | DIS | M4)) \
++	/*GPIO_154 - LCD_QVGA/nVGA */\
++	MUX_VAL(CP(McBSP4_DX),      (OFF_OUT_PD | IDIS | PTD | DIS | M4)) \
++	/*GPIO_155 - LCD_RESB */\
++	MUX_VAL(CP(McBSP4_FSX),     (OFF_OUT_PD | IDIS | PTD | DIS | M4)) \
++	/*McBSP1_CLKR  */\
++	MUX_VAL(CP(McBSP1_CLKR),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*McBSP1_FSR*/\
++	MUX_VAL(CP(McBSP1_FSR),     (OFF_OUT_PD | IDIS | PTU | EN  | M0)) \
++	/*McBSP1_DX*/\
++	MUX_VAL(CP(McBSP1_DX),      (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*McBSP1_DR*/\
++	MUX_VAL(CP(McBSP1_DR),      (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*McBSP_CLKS  */\
++	MUX_VAL(CP(McBSP_CLKS),     (OFF_IN_PD  | IEN  | PTU | DIS | M0)) \
++	/*McBSP1_FSX*/\
++	MUX_VAL(CP(McBSP1_FSX),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*McBSP1_CLKX  */\
++	MUX_VAL(CP(McBSP1_CLKX),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*Serial Interface*/\
++	/*UART3_CTS_RCTX */\
++	MUX_VAL(CP(UART3_CTS_RCTX), (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*UART3_RTS_SD */\
++	MUX_VAL(CP(UART3_RTS_SD),   (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*UART3_RX_IRRX*/\
++	MUX_VAL(CP(UART3_RX_IRRX),  (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*UART3_TX_IRTX*/\
++	MUX_VAL(CP(UART3_TX_IRTX),  (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*HSUSB0_CLK*/\
++	MUX_VAL(CP(HSUSB0_CLK),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*HSUSB0_STP*/\
++	MUX_VAL(CP(HSUSB0_STP),     (OFF_OUT_PD | IDIS | PTU | EN  | M0)) \
++	/*HSUSB0_DIR*/\
++	MUX_VAL(CP(HSUSB0_DIR),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*HSUSB0_NXT*/\
++	MUX_VAL(CP(HSUSB0_NXT),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*HSUSB0_DATA0 */\
++	MUX_VAL(CP(HSUSB0_DATA0),   (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*HSUSB0_DATA1 */\
++	MUX_VAL(CP(HSUSB0_DATA1),   (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*HSUSB0_DATA2 */\
++	MUX_VAL(CP(HSUSB0_DATA2),   (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*HSUSB0_DATA3 */\
++	MUX_VAL(CP(HSUSB0_DATA3),   (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*HSUSB0_DATA4 */\
++	MUX_VAL(CP(HSUSB0_DATA4),   (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*HSUSB0_DATA5 */\
++	MUX_VAL(CP(HSUSB0_DATA5),   (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*HSUSB0_DATA6 */\
++	MUX_VAL(CP(HSUSB0_DATA6),   (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*HSUSB0_DATA7 */\
++	MUX_VAL(CP(HSUSB0_DATA7),   (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*I2C1_SCL*/\
++	MUX_VAL(CP(I2C1_SCL),       (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*I2C1_SDA*/\
++	MUX_VAL(CP(I2C1_SDA),       (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*I2C2_SCL*/\
++	MUX_VAL(CP(I2C2_SCL),       (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*I2C2_SDA*/\
++	MUX_VAL(CP(I2C2_SDA),       (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*I2C3_SCL*/\
++	MUX_VAL(CP(I2C3_SCL),       (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*I2C3_SDA*/\
++	MUX_VAL(CP(I2C3_SDA),       (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*I2C4_SCL*/\
++	MUX_VAL(CP(I2C4_SCL),       (IEN  | PTU | EN  | M0)) \
++	/*I2C4_SDA*/\
++	MUX_VAL(CP(I2C4_SDA),       (IEN  | PTU | EN  | M0)) \
++	/*HDQ_SIO*/\
++	MUX_VAL(CP(HDQ_SIO),        (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*McSPI1_CLK*/\
++	MUX_VAL(CP(McSPI1_CLK),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*McSPI1_SIMO  */\
++	MUX_VAL(CP(McSPI1_SIMO),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*McSPI1_SOMI  */\
++	MUX_VAL(CP(McSPI1_SOMI),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*McSPI1_CS0*/\
++	MUX_VAL(CP(McSPI1_CS0),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*GPIO_175 - TS_PEN_IRQ */\
++	MUX_VAL(CP(McSPI1_CS1),     (OFF_IN_PD  | IEN  | PTD | EN  | M4)) \
++	/*GPIO_176 - LAN_INTR*/\
++	MUX_VAL(CP(McSPI1_CS2),     (OFF_IN_PD  | IEN  | PTD | DIS | M4)) \
++	/*McSPI1_CS3*/\
++	MUX_VAL(CP(McSPI1_CS3),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*McSPI2_CLK*/\
++	MUX_VAL(CP(McSPI2_CLK),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*McSPI2_SIMO*/\
++	MUX_VAL(CP(McSPI2_SIMO),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*McSPI2_SOMI*/\
++	MUX_VAL(CP(McSPI2_SOMI),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*McSPI2_CS0*/\
++	MUX_VAL(CP(McSPI2_CS0),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*McSPI2_CS1*/\
++	MUX_VAL(CP(McSPI2_CS1),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*Control and debug */\
++	MUX_VAL(CP(SYS_32K),        (IEN  | PTD | DIS | M0)) /*SYS_32K*/\
++	MUX_VAL(CP(SYS_CLKREQ),     (IEN  | PTD | DIS | M0)) /*SYS_CLKREQ*/\
++	/*SYS_nIRQ*/\
++	MUX_VAL(CP(SYS_nIRQ),       (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*GPIO_2*/\
++	MUX_VAL(CP(SYS_BOOT0),      (OFF_OUT_PD | IEN  | PTD | DIS | M4)) \
++	/*GPIO_3 */\
++	MUX_VAL(CP(SYS_BOOT1),      (OFF_OUT_PD | IEN  | PTD | DIS | M4)) \
++	/*GPIO_4 */\
++	MUX_VAL(CP(SYS_BOOT2),      (OFF_OUT_PD | IEN  | PTD | DIS | M4)) \
++	/*GPIO_5*/\
++	MUX_VAL(CP(SYS_BOOT3),      (OFF_OUT_PD | IEN  | PTD | DIS | M4)) \
++	/*GPIO_6*/\
++	MUX_VAL(CP(SYS_BOOT4),      (OFF_OUT_PD | IEN  | PTD | DIS | M4)) \
++	/*GPIO_7*/\
++	MUX_VAL(CP(SYS_BOOT5),      (OFF_OUT_PD | IEN  | PTD | DIS | M4)) \
++	/*GPIO_8 - VIO 1V8*/\
++	MUX_VAL(CP(SYS_BOOT6),      (OFF_OUT_PD | IDIS | PTD | DIS | M4)) \
++	MUX_VAL(CP(SYS_OFF_MODE),   (IEN  | PTD | DIS | M0)) /*SYS_OFF_MODE */\
++	MUX_VAL(CP(SYS_CLKOUT1),    (IEN  | PTD | DIS | M0)) /*SYS_CLKOUT1  */\
++	/*SYS_CLKOUT2*/\
++	MUX_VAL(CP(SYS_CLKOUT2),    (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	MUX_VAL(CP(JTAG_nTRST),     (IEN  | PTD | DIS | M0)) /*JTAG_nTRST*/\
++	MUX_VAL(CP(JTAG_TCK),       (IEN  | PTD | DIS | M0)) /*JTAG_TCK*/\
++	MUX_VAL(CP(JTAG_TMS),       (IEN  | PTD | DIS | M0)) /*JTAG_TMS*/\
++	MUX_VAL(CP(JTAG_TDI),       (IEN  | PTD | DIS | M0)) /*JTAG_TDI*/\
++	/*JTAG_EMU0*/\
++	MUX_VAL(CP(JTAG_EMU0),      (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*JTAG_EMU1*/\
++	MUX_VAL(CP(JTAG_EMU1),      (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_CLK*/\
++	MUX_VAL(CP(ETK_CLK_ES2),    (OFF_OUT_PD | IDIS | PTU | EN  | M0)) \
++	/*ETK_CTL*/\
++	MUX_VAL(CP(ETK_CTL_ES2),    (OFF_OUT_PD | IDIS | PTD | DIS | M0)) \
++	/*ETK_D0*/\
++	MUX_VAL(CP(ETK_D0_ES2),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_D1*/\
++	MUX_VAL(CP(ETK_D1_ES2),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_D2*/\
++	MUX_VAL(CP(ETK_D2_ES2),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*ETK_D3*/\
++	MUX_VAL(CP(ETK_D3_ES2),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_D4*/\
++	MUX_VAL(CP(ETK_D4_ES2),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_D5*/\
++	MUX_VAL(CP(ETK_D5_ES2),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_D6*/\
++	MUX_VAL(CP(ETK_D6_ES2),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_D7*/\
++	MUX_VAL(CP(ETK_D7_ES2),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_D8*/\
++	MUX_VAL(CP(ETK_D8_ES2),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_D9*/\
++	MUX_VAL(CP(ETK_D9_ES2),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_D10*/\
++	MUX_VAL(CP(ETK_D10_ES2),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_D11*/\
++	MUX_VAL(CP(ETK_D11_ES2),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_D12*/\
++	MUX_VAL(CP(ETK_D12_ES2),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_D13*/\
++	MUX_VAL(CP(ETK_D13_ES2),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_D14*/\
++	MUX_VAL(CP(ETK_D14_ES2),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*ETK_D15*/\
++	MUX_VAL(CP(ETK_D15_ES2),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*Die to Die */\
++	/*d2d_mcad0*/\
++	MUX_VAL(CP(d2d_mcad0),      (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad1*/\
++	MUX_VAL(CP(d2d_mcad1),      (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad2*/\
++	MUX_VAL(CP(d2d_mcad2),      (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad3*/\
++	MUX_VAL(CP(d2d_mcad3),      (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad4*/\
++	MUX_VAL(CP(d2d_mcad4),      (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad5*/\
++	MUX_VAL(CP(d2d_mcad5),      (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad6*/\
++	MUX_VAL(CP(d2d_mcad6),      (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad7*/\
++	MUX_VAL(CP(d2d_mcad7),      (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad8*/\
++	MUX_VAL(CP(d2d_mcad8),      (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad9*/\
++	MUX_VAL(CP(d2d_mcad9),      (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad10*/\
++	MUX_VAL(CP(d2d_mcad10),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad11*/\
++	MUX_VAL(CP(d2d_mcad11),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad12*/\
++	MUX_VAL(CP(d2d_mcad12),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad13*/\
++	MUX_VAL(CP(d2d_mcad13),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad14*/\
++	MUX_VAL(CP(d2d_mcad14),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad15*/\
++	MUX_VAL(CP(d2d_mcad15),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad16*/\
++	MUX_VAL(CP(d2d_mcad16),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad17*/\
++	MUX_VAL(CP(d2d_mcad17),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad18*/\
++	MUX_VAL(CP(d2d_mcad18),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad19*/\
++	MUX_VAL(CP(d2d_mcad19),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad20*/\
++	MUX_VAL(CP(d2d_mcad20),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad21*/\
++	MUX_VAL(CP(d2d_mcad21),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad22*/\
++	MUX_VAL(CP(d2d_mcad22),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad23*/\
++	MUX_VAL(CP(d2d_mcad23),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad24*/\
++	MUX_VAL(CP(d2d_mcad24),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad25*/\
++	MUX_VAL(CP(d2d_mcad25),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad26*/\
++	MUX_VAL(CP(d2d_mcad26),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad27*/\
++	MUX_VAL(CP(d2d_mcad27),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad28*/\
++	MUX_VAL(CP(d2d_mcad28),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad29*/\
++	MUX_VAL(CP(d2d_mcad29),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad30*/\
++	MUX_VAL(CP(d2d_mcad30),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad31*/\
++	MUX_VAL(CP(d2d_mcad31),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad32*/\
++	MUX_VAL(CP(d2d_mcad32),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad33*/\
++	MUX_VAL(CP(d2d_mcad33),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad34*/\
++	MUX_VAL(CP(d2d_mcad34),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad35*/\
++	MUX_VAL(CP(d2d_mcad35),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_mcad36*/\
++	MUX_VAL(CP(d2d_mcad36),     (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_clk26mi  */\
++	MUX_VAL(CP(d2d_clk26mi),    (OFF_OUT_PD | IEN  | PTD | DIS | M0)) \
++	/*d2d_nrespwron*/\
++	MUX_VAL(CP(d2d_nrespwron),  (OFF_OUT_PD | IEN  | PTD | EN  | M0)) \
++	/*d2d_nreswarm */\
++	MUX_VAL(CP(d2d_nreswarm),   (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*d2d_arm9nirq */\
++	MUX_VAL(CP(d2d_arm9nirq),   (OFF_OUT_PD | IEN  | PTD | DIS | M0)) \
++	/*d2d_uma2p6fiq*/\
++	MUX_VAL(CP(d2d_uma2p6fiq),  (OFF_OUT_PD | IEN  | PTD | DIS | M0)) \
++	/*d2d_spint*/\
++	MUX_VAL(CP(d2d_spint),      (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_frint*/\
++	MUX_VAL(CP(d2d_frint),      (OFF_IN_PD  | IEN  | PTD | EN  | M0)) \
++	/*d2d_dmareq0  */\
++	MUX_VAL(CP(d2d_dmareq0),    (OFF_OUT_PD | IEN  | PTD | DIS | M0)) \
++	/*d2d_dmareq1  */\
++	MUX_VAL(CP(d2d_dmareq1),    (OFF_OUT_PD | IEN  | PTD | DIS | M0)) \
++	/*d2d_dmareq2  */\
++	MUX_VAL(CP(d2d_dmareq2),    (OFF_OUT_PD | IEN  | PTD | DIS | M0)) \
++	/*d2d_dmareq3  */\
++	MUX_VAL(CP(d2d_dmareq3),    (OFF_OUT_PD | IEN  | PTD | DIS | M0)) \
++	/*d2d_n3gtrst  */\
++	MUX_VAL(CP(d2d_n3gtrst),    (OFF_OUT_PD | IEN  | PTD | DIS | M0)) \
++	/*d2d_n3gtdi*/\
++	MUX_VAL(CP(d2d_n3gtdi),     (OFF_OUT_PD | IEN  | PTD | DIS | M0)) \
++	/*d2d_n3gtdo*/\
++	MUX_VAL(CP(d2d_n3gtdo),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*d2d_n3gtms*/\
++	MUX_VAL(CP(d2d_n3gtms),     (OFF_OUT_PD | IEN  | PTD | DIS | M0)) \
++	/*d2d_n3gtck*/\
++	MUX_VAL(CP(d2d_n3gtck),     (OFF_OUT_PD | IEN  | PTD | DIS | M0)) \
++	/*d2d_n3grtck  */\
++	MUX_VAL(CP(d2d_n3grtck),    (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*d2d_mstdby*/\
++	MUX_VAL(CP(d2d_mstdby),     (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	MUX_VAL(CP(d2d_swakeup),    (IEN  | PTD | EN  | M0)) /*d2d_swakeup  */\
++	/*d2d_idlereq  */\
++	MUX_VAL(CP(d2d_idlereq),    (OFF_OUT_PD | IEN  | PTD | DIS | M0)) \
++	/*d2d_idleack  */\
++	MUX_VAL(CP(d2d_idleack),    (OFF_IN_PD  | IEN  | PTU | EN  | M0)) \
++	/*d2d_mwrite*/\
++	MUX_VAL(CP(d2d_mwrite),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*d2d_swrite*/\
++	MUX_VAL(CP(d2d_swrite),     (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*d2d_mread*/\
++	MUX_VAL(CP(d2d_mread),      (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*d2d_sread*/\
++	MUX_VAL(CP(d2d_sread),      (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*d2d_mbusflag */\
++	MUX_VAL(CP(d2d_mbusflag),   (OFF_IN_PD  | IEN  | PTD | DIS | M0)) \
++	/*d2d_sbusflag */\
++	MUX_VAL(CP(d2d_sbusflag),   (OFF_OUT_PD | IEN  | PTD | DIS | M0)) \
++	/*sdrc_cke0 */\
++	MUX_VAL(CP(sdrc_cke0),      (IDIS | PTU | EN  | M0)) \
++	/*sdrc_cke1 not used*/\
++	MUX_VAL(CP(sdrc_cke1),      (IDIS | PTD | DIS | M7))
++
++
++
+ #define MUX_DEFAULT_ES2() \
+ 	/*SDRC*/\
+ 	MUX_VAL(CP(SDRC_D0),        (IEN  | PTD | DIS | M0)) /*SDRC_D0*/\
+diff --git a/include/configs/omap3_evm.h b/include/configs/omap3_evm.h
+index ccf65be..cad7848 100644
+--- a/include/configs/omap3_evm.h
++++ b/include/configs/omap3_evm.h
+@@ -80,6 +80,8 @@
+ #define CFG_NS16550_REG_SIZE	(-4)
+ #define CFG_NS16550_CLK		V_NS16550_CLK
+ 
++#define CONFIG_OFF_PADCONF	1
++
+ /*
+  * select serial console configuration
+  */
+@@ -104,6 +106,7 @@
+ #define CONFIG_CMD_I2C          /* I2C serial bus support       */
+ #define CONFIG_CMD_MMC		/* MMC support			*/
+ #define CONFIG_CMD_ONENAND	/* ONENAND support		*/
++#define CONFIG_CMD_NAND		/* NAND support		        */
+ 
+ #define CONFIG_CMD_AUTOSCRIPT	/* autoscript support		*/
+ #define CONFIG_CMD_BDI		/* bdinfo			*/
+@@ -252,8 +255,8 @@
+ #define CFG_ONENAND_BASE	ONENAND_MAP
+ 
+ #define CFG_ENV_IS_IN_ONENAND	1
+-#define ONENAND_ENV_OFFSET	0x260000	/* environment starts here  */
+-#define SMNAND_ENV_OFFSET	0x260000	/* environment starts here  */
++#define ONENAND_ENV_OFFSET	0x240000	/* environment starts here  */
++#define SMNAND_ENV_OFFSET	0x240000	/* environment starts here  */
+ 
+ #define CFG_ENV_SECT_SIZE	boot_flash_sec
+ #define CFG_ENV_OFFSET		boot_flash_off
+diff --git a/include/onenand_uboot.h b/include/onenand_uboot.h
+index 6605e4f..4c5acca 100644
+--- a/include/onenand_uboot.h
++++ b/include/onenand_uboot.h
+@@ -19,6 +19,8 @@
+ struct mtd_info;
+ struct erase_info;
+ 
++#define ONENAND_SCRUB  0x10
++
+ extern struct mtd_info onenand_mtd;
+ 
+ /* Functions */
+@@ -29,10 +31,15 @@ extern int onenand_read_oob(struct mtd_info *mtd, loff_t from,
+ 			    struct mtd_oob_ops *ops);
+ extern int onenand_write(struct mtd_info *mtd, loff_t from, size_t len,
+ 			 size_t * retlen, const u_char * buf);
++extern int onenand_write_oob(struct mtd_info *mtd, loff_t to,
++			struct mtd_oob_ops *oob_ops);
+ extern int onenand_erase(struct mtd_info *mtd, struct erase_info *instr);
+ 
+ extern int onenand_unlock(struct mtd_info *mtd, loff_t ofs, size_t len);
+ 
+ extern char *onenand_print_device_info(int device);
+ 
++extern int onenand_block_markbad(struct mtd_info *mtd, loff_t ofs);
++extern int onenand_block_isbad(struct mtd_info *mtd, loff_t ofs);
++
+ #endif /* __UBOOT_ONENAND_H */
+diff --git a/net/net.c b/net/net.c
+index 313d5d8..62546fb 100644
+--- a/net/net.c
++++ b/net/net.c
+@@ -565,7 +565,6 @@ restart:
+ 				sprintf(buf, "%lX", (unsigned long)load_addr);
+ 				setenv("fileaddr", buf);
+ 			}
+-			eth_halt();
+ 			return NetBootFileXferSize;
+ 
+ 		case NETLOOP_FAIL:
+diff --git a/net/tftp.c b/net/tftp.c
+index 84d83ca..575a88c 100644
+--- a/net/tftp.c
++++ b/net/tftp.c
+@@ -72,7 +72,7 @@ extern flash_info_t flash_info[];
+  * Minus eth.hdrs thats 1468.  Can get 2x better throughput with
+  * almost-MTU block sizes.  At least try... fall back to 512 if need be.
+  */
+-#define TFTP_MTU_BLOCKSIZE 1468
++#define TFTP_MTU_BLOCKSIZE 512
+ static unsigned short TftpBlkSize=TFTP_BLOCK_SIZE;
+ static unsigned short TftpBlkSizeOption=TFTP_MTU_BLOCKSIZE;
+ 
+-- 
+1.5.6
+

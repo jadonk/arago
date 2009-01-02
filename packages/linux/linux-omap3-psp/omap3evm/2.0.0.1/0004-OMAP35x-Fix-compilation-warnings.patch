@@ -1,0 +1,37 @@
+From 53c5c1f47714ce58634c32418979f0438191c96c Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Thu, 4 Sep 2008 22:27:25 +0530
+Subject: [PATCH 04/24] OMAP35x: Fix compilation warnings
+
+Fix compilation warnings.
+---
+ arch/arm/mach-omap2/board-omap3evm-flash.c |    6 +++---
+ 1 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm/mach-omap2/board-omap3evm-flash.c b/arch/arm/mach-omap2/board-omap3evm-flash.c
+index 109d8f2..90f81b5 100644
+--- a/arch/arm/mach-omap2/board-omap3evm-flash.c
++++ b/arch/arm/mach-omap2/board-omap3evm-flash.c
+@@ -23,7 +23,7 @@
+ #include <asm/arch/gpmc.h>
+ #include <asm/arch/nand.h>
+ 
+-static int omap3evm_onenand_setup(void __iomem *);
++static int omap3evm_onenand_setup(void __iomem *, int freq);
+ 
+ static struct mtd_partition omap3evm_onenand_partitions[] = {
+ 	{
+@@ -76,8 +76,8 @@ static struct platform_device omap3evm_onenand_device = {
+  *
+  */
+ 
+-static int omap3evm_onenand_setup(void __iomem *onenand_base)
+-	{
++static int omap3evm_onenand_setup(void __iomem *onenand_base, int freq)
++{
+ 	/* nothing is required to be setup for onenand as of now */
+ 	return 0;
+ }
+-- 
+1.5.6
+

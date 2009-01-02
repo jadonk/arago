@@ -1,0 +1,197 @@
+From 5ddefd521e488ae3352ab509aec78f71e759ce79 Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Mon, 15 Sep 2008 15:17:22 +0530
+Subject: [PATCH 17/24] OMAP 35x : Merging fixes from OMAP mailing list.
+
+---
+ arch/arm/mach-omap1/clock.c      |    8 ++++----
+ arch/arm/mach-omap2/clock.c      |   16 ++++++++--------
+ arch/arm/mach-omap2/clock34xx.h  |    2 +-
+ arch/arm/plat-omap/dma.c         |    3 ++-
+ drivers/video/omap/omapfb_main.c |    6 +++---
+ 5 files changed, 18 insertions(+), 17 deletions(-)
+
+diff --git a/arch/arm/mach-omap1/clock.c b/arch/arm/mach-omap1/clock.c
+index 4ea2933..c6b805b 100644
+--- a/arch/arm/mach-omap1/clock.c
++++ b/arch/arm/mach-omap1/clock.c
+@@ -201,7 +201,7 @@ static int calc_dsor_exp(struct clk *clk, unsigned long rate)
+ 		return -EINVAL;
+ 
+ 	parent = clk->parent;
+-	if (unlikely(parent == 0))
++	if (unlikely(parent == NULL))
+ 		return -EIO;
+ 
+ 	realrate = parent->rate;
+@@ -499,7 +499,7 @@ static int omap1_clk_enable_generic(struct clk *clk)
+ 	if (clk->flags & ALWAYS_ENABLED)
+ 		return 0;
+ 
+-	if (unlikely(clk->enable_reg == 0)) {
++	if (unlikely(clk->enable_reg == NULL)) {
+ 		printk(KERN_ERR "clock.c: Enable for %s without enable code\n",
+ 		       clk->name);
+ 		return -EINVAL;
+@@ -535,7 +535,7 @@ static void omap1_clk_disable_generic(struct clk *clk)
+ 	__u16 regval16;
+ 	__u32 regval32;
+ 
+-	if (clk->enable_reg == 0)
++	if (clk->enable_reg == NULL)
+ 		return;
+ 
+ 	if (clk->flags & ENABLE_REG_32BIT) {
+@@ -577,7 +577,7 @@ static long omap1_clk_round_rate(struct clk *clk, unsigned long rate)
+ 		return clk->parent->rate / (1 << dsor_exp);
+ 	}
+ 
+-	if(clk->round_rate != 0)
++	if (clk->round_rate != NULL)
+ 		return clk->round_rate(clk, rate);
+ 
+ 	return clk->rate;
+diff --git a/arch/arm/mach-omap2/clock.c b/arch/arm/mach-omap2/clock.c
+index 3e15681..b3ea84e 100644
+--- a/arch/arm/mach-omap2/clock.c
++++ b/arch/arm/mach-omap2/clock.c
+@@ -324,7 +324,7 @@ static int _omap2_clk_enable(struct clk *clk)
+ 	if (clk->enable)
+ 		return clk->enable(clk);
+ 
+-	if (!clk->enable_reg) {
++	if (unlikely(clk->enable_reg == NULL)) {
+ 		printk(KERN_ERR "clock.c: Enable for %s without enable code\n",
+ 		       clk->name);
+ 		return 0; /* REVISIT: -EINVAL */
+@@ -356,7 +356,7 @@ static void _omap2_clk_disable(struct clk *clk)
+ 		return;
+ 	}
+ 
+-	if (!clk->enable_reg) {
++	if (clk->enable_reg == NULL) {
+ 		/*
+ 		 * 'Independent' here refers to a clock which is not
+ 		 * controlled by its parent.
+@@ -561,7 +561,7 @@ long omap2_clksel_round_rate(struct clk *clk, unsigned long target_rate)
+ /* Given a clock and a rate apply a clock specific rounding function */
+ long omap2_clk_round_rate(struct clk *clk, unsigned long rate)
+ {
+-	if (clk->round_rate)
++	if (clk->round_rate != NULL)
+ 		return clk->round_rate(clk, rate);
+ 
+ 	if (clk->flags & RATE_FIXED)
+@@ -650,7 +650,7 @@ u32 omap2_divisor_to_clksel(struct clk *clk, u32 div)
+  */
+ static void __iomem *omap2_get_clksel(struct clk *clk, u32 *field_mask)
+ {
+-	if (!clk->clksel_reg || (clk->clksel_mask == 0))
++	if (unlikely((clk->clksel_reg == NULL) || (clk->clksel_mask == NULL)))
+ 		return NULL;
+ 
+ 	*field_mask = clk->clksel_mask;
+@@ -670,7 +670,7 @@ u32 omap2_clksel_get_divisor(struct clk *clk)
+ 	void __iomem *div_addr;
+ 
+ 	div_addr = omap2_get_clksel(clk, &field_mask);
+-	if (!div_addr)
++	if (div_addr == NULL)
+ 		return 0;
+ 
+ 	field_val = __raw_readl(div_addr) & field_mask;
+@@ -690,7 +690,7 @@ int omap2_clksel_set_rate(struct clk *clk, unsigned long rate)
+ 		return -EINVAL;
+ 
+ 	div_addr = omap2_get_clksel(clk, &field_mask);
+-	if (!div_addr)
++	if (div_addr == NULL)
+ 		return -EINVAL;
+ 
+ 	field_val = omap2_divisor_to_clksel(clk, new_div);
+@@ -729,7 +729,7 @@ int omap2_clk_set_rate(struct clk *clk, unsigned long rate)
+ 		return -EINVAL;
+ 
+ 	/* dpll_ck, core_ck, virt_prcm_set; plus all clksel clocks */
+-	if (clk->set_rate)
++	if (clk->set_rate != NULL)
+ 		ret = clk->set_rate(clk, rate);
+ 
+ 	if (ret == 0 && (clk->flags & RATE_PROPAGATES))
+@@ -791,7 +791,7 @@ int omap2_clk_set_parent(struct clk *clk, struct clk *new_parent)
+ 
+ 	field_val = omap2_clksel_get_src_field(&src_addr, new_parent,
+ 					       &field_mask, clk, &parent_div);
+-	if (!src_addr)
++	if (src_addr == NULL)
+ 		return -EINVAL;
+ 
+ 	if (clk->usecount > 0)
+diff --git a/arch/arm/mach-omap2/clock34xx.h b/arch/arm/mach-omap2/clock34xx.h
+index d7d6ffd..3504e48 100644
+--- a/arch/arm/mach-omap2/clock34xx.h
++++ b/arch/arm/mach-omap2/clock34xx.h
+@@ -1010,7 +1010,7 @@ static struct clk clkout2_src_ck = {
+ 	.clksel_mask	= OMAP3430_CLKOUT2SOURCE_MASK,
+ 	.clksel		= clkout2_src_clksel,
+ 	.flags		= CLOCK_IN_OMAP343X | RATE_PROPAGATES,
+-	.clkdm		= { .name = "core_clkdm" },
++	.clkdm		= { .name = "core_l4_clkdm" },
+ 	.recalc		= &omap2_clksel_recalc,
+ };
+ 
+diff --git a/arch/arm/plat-omap/dma.c b/arch/arm/plat-omap/dma.c
+index fac8e99..1b154c4 100644
+--- a/arch/arm/plat-omap/dma.c
++++ b/arch/arm/plat-omap/dma.c
+@@ -712,6 +712,7 @@ int omap_request_dma(int dev_id, const char *dev_name,
+ 	chan->dev_name = dev_name;
+ 	chan->callback = callback;
+ 	chan->data = data;
++	chan->flags = 0;
+ 
+ #ifndef CONFIG_ARCH_OMAP1
+ 	if (cpu_class_is_omap2()) {
+@@ -1233,7 +1234,7 @@ int omap_request_dma_chain(int dev_id, const char *dev_name,
+ 	/* request and reserve DMA channels for the chain */
+ 	for (i = 0; i < no_of_chans; i++) {
+ 		err = omap_request_dma(dev_id, dev_name,
+-					callback, 0, &channels[i]);
++					callback, NULL, &channels[i]);
+ 		if (err < 0) {
+ 			int j;
+ 			for (j = 0; j < i; j++)
+diff --git a/drivers/video/omap/omapfb_main.c b/drivers/video/omap/omapfb_main.c
+index 418ed9f..20c1a85 100644
+--- a/drivers/video/omap/omapfb_main.c
++++ b/drivers/video/omap/omapfb_main.c
+@@ -761,7 +761,7 @@ static int omapfb_update_win(struct fb_info *fbi,
+ 	int ret;
+ 
+ 	omapfb_rqueue_lock(plane->fbdev);
+-	ret = omapfb_update_window_async(fbi, win, NULL, 0);
++	ret = omapfb_update_window_async(fbi, win, NULL, NULL);
+ 	omapfb_rqueue_unlock(plane->fbdev);
+ 
+ 	return ret;
+@@ -789,7 +789,7 @@ static int omapfb_update_full_screen(struct fb_info *fbi)
+ 	win.format = 0;
+ 
+ 	omapfb_rqueue_lock(fbdev);
+-	r = fbdev->ctrl->update_window(fbi, &win, NULL, 0);
++	r = fbdev->ctrl->update_window(fbi, &win, NULL, NULL);
+ 	omapfb_rqueue_unlock(fbdev);
+ 
+ 	return r;
+@@ -1068,7 +1068,7 @@ void omapfb_write_first_pixel(struct omapfb_device *fbdev, u16 pixval)
+ 		win.height = 2;
+ 		win.out_width = 2;
+ 		win.out_height = 2;
+-		fbdev->ctrl->update_window(fbdev->fb_info[0], &win, NULL, 0);
++		fbdev->ctrl->update_window(fbdev->fb_info[0], &win, NULL, NULL);
+ 	}
+ 	omapfb_rqueue_unlock(fbdev);
+ }
+-- 
+1.5.6
+

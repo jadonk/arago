@@ -1,0 +1,102 @@
+From 2dc4a02b0011df3dee52e1a525accb6d3c88d2a3 Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Tue, 23 Sep 2008 14:11:23 +0530
+Subject: [PATCH 23/24] OMAP35x :Fix for lcd clr,frame rate, and mem order.
+
+---
+ arch/arm/plat-omap/omap-dss.c     |   12 ++++++------
+ drivers/video/omap/lcd_omap3evm.c |   16 ++++++++++++----
+ include/linux/i2c/twl4030.h       |    4 ++++
+ include/linux/mmzone.h            |    2 +-
+ 4 files changed, 23 insertions(+), 11 deletions(-)
+
+diff --git a/arch/arm/plat-omap/omap-dss.c b/arch/arm/plat-omap/omap-dss.c
+index 31ff9b6..6c0633a 100644
+--- a/arch/arm/plat-omap/omap-dss.c
++++ b/arch/arm/plat-omap/omap-dss.c
+@@ -1572,13 +1572,13 @@ void omap_disp_reg_sync(int output_dev)
+ 		dispc_reg_merge(DISPC_CONTROL, DISPC_CONTROL_GODIGITAL,
+ 				DISPC_CONTROL_GODIGITAL);
+ 
+-	timeout = HZ / 3;
+-	timeout += jiffies;
+-	while (omap_disp_reg_sync_bit(output_dev) &&
+-			time_before(jiffies, timeout)) {
+-		if ((!in_interrupt()) && (!irqs_disabled())) {
++	if ((!in_interrupt()) && (!irqs_disabled())) {
++		timeout = HZ / 3;
++		timeout += jiffies;
++		while (omap_disp_reg_sync_bit(output_dev) &&
++				time_before(jiffies, timeout)) {
+ 			set_current_state(TASK_INTERRUPTIBLE);
+-			schedule_timeout(10);
++			schedule_timeout(1);
+ 
+ 		}
+ 	}
+diff --git a/drivers/video/omap/lcd_omap3evm.c b/drivers/video/omap/lcd_omap3evm.c
+index f5a1477..bb04c31 100644
+--- a/drivers/video/omap/lcd_omap3evm.c
++++ b/drivers/video/omap/lcd_omap3evm.c
+@@ -59,18 +59,26 @@ static int omap3evm_panel_init(struct lcd_panel *panel,
+ 	omap_request_gpio(LCD_PANEL_INI);
+ 	omap_request_gpio(LCD_PANEL_RESB);
+ 	omap_request_gpio(LCD_PANEL_QVGA);
++	omap_request_gpio(LCD_PANEL_ENABLE_GPIO); /* ENVDD */
+ 
+ 	omap_set_gpio_direction(LCD_PANEL_LR, 0);
+ 	omap_set_gpio_direction(LCD_PANEL_UD, 0);
+ 	omap_set_gpio_direction(LCD_PANEL_INI, 0);
+ 	omap_set_gpio_direction(LCD_PANEL_RESB, 0);
+ 	omap_set_gpio_direction(LCD_PANEL_QVGA, 0);
++	omap_set_gpio_direction(LCD_PANEL_ENABLE_GPIO, 0); /* output */
+ 
+-	twl4030_i2c_write_u8(TWL4030_MODULE_LED, 0x11, TWL_LED_LEDEN);
+-	twl4030_i2c_write_u8(TWL4030_MODULE_PWMA, 0x01, TWL_PWMA_PWMAON);
+-	twl4030_i2c_write_u8(TWL4030_MODULE_PWMA, 0x02, TWL_PWMA_PWMAOFF);
+-	bklight_level = 100;
++	twl4030_i2c_write_u8(TWL4030_MODULE_PWMA, 0x7F, 0);
++	twl4030_i2c_write_u8(TWL4030_MODULE_PWMA, 0x7F, 1);
++	twl4030_i2c_write_u8(TWL4030_MODULE_PWMB, 0x7F, 0);
++	twl4030_i2c_write_u8(TWL4030_MODULE_PWMB, 0x7F, 1);
++
++	twl4030_i2c_write_u8(TWL4030_MODULE_PM_RECEIVER,
++			ENABLE_VPLL2_DEDICATED, TWL4030_VPLL2_DEDICATED);
++	twl4030_i2c_write_u8(TWL4030_MODULE_PM_RECEIVER,
++			ENABLE_VPLL2_DEV_GRP, TWL4030_VPLL2_DEV_GRP);
+ 
++	bklight_level = 100;
+ 	omap_set_gpio_dataout(LCD_PANEL_RESB, 1);
+ 	omap_set_gpio_dataout(LCD_PANEL_INI, 1);
+ 	omap_set_gpio_dataout(LCD_PANEL_QVGA, 0);
+diff --git a/include/linux/i2c/twl4030.h b/include/linux/i2c/twl4030.h
+index b141cc7..78d2392 100644
+--- a/include/linux/i2c/twl4030.h
++++ b/include/linux/i2c/twl4030.h
+@@ -83,6 +83,10 @@
+ #define TWL4030_VAUX2_DEDICATED		0x1E
+ #define TWL4030_VAUX3_DEV_GRP		0x1F
+ #define TWL4030_VAUX3_DEDICATED		0x22
++#define TWL4030_VAUX4_DEV_GRP           0x23
++#define TWL4030_VAUX4_DEDICATED         0x26
++#define TWL4030_VPLL2_DEV_GRP           0x33
++#define TWL4030_VPLL2_DEDICATED         0x36
+ 
+ /* TWL4030 GPIO interrupt definitions */
+ 
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index 443bc7c..6237676 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -21,7 +21,7 @@
+ 
+ /* Free memory management - zoned buddy allocator.  */
+ #ifndef CONFIG_FORCE_MAX_ZONEORDER
+-#define MAX_ORDER 11
++#define MAX_ORDER 12
+ #else
+ #define MAX_ORDER CONFIG_FORCE_MAX_ZONEORDER
+ #endif
+-- 
+1.5.6
+

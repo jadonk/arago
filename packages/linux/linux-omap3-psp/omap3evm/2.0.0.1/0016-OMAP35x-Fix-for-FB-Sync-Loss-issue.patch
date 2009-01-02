@@ -1,0 +1,25 @@
+From d87c4c1742c85965e38ec885e778a29bcbbb8774 Mon Sep 17 00:00:00 2001
+From: Satish N <gitadmin@gitsvr01.(none)>
+Date: Fri, 12 Sep 2008 12:20:00 +0530
+Subject: [PATCH 16/24] OMAP35x : Fix for FB Sync Loss issue.
+
+---
+ drivers/video/omap/dispc.c |    2 +-
+ 1 files changed, 1 insertions(+), 1 deletions(-)
+
+diff --git a/drivers/video/omap/dispc.c b/drivers/video/omap/dispc.c
+index 23621ca..81ad26e 100644
+--- a/drivers/video/omap/dispc.c
++++ b/drivers/video/omap/dispc.c
+@@ -1239,7 +1239,7 @@ static int omap_dispc_init(struct omapfb_device *fbdev, int ext_mode,
+ 	/* Enable smart idle and autoidle */
+ 	l = dispc_read_reg(DISPC_SYSCONFIG);
+ 	l &= ~((3 << 12) | (3 << 3));
+-	l |= (2 << 12) | (2 << 3) | (1 << 0);
++	l |= (2 << 12) | (2 << 3) | (1 << 2) | (1 << 0);
+ 	dispc_write_reg(DISPC_SYSCONFIG, l);
+ 
+ 	/* Set functional clock autogating */
+-- 
+1.5.6
+

@@ -1,0 +1,27 @@
+From 97c996a7256f22449903f5333a305fcf15ee1d17 Mon Sep 17 00:00:00 2001
+From: Sriram <srk@ti.com>
+Date: Wed, 10 Sep 2008 21:10:53 +0530
+Subject: [PATCH 15/24] OMAP 35x : Display driver makefile update.
+
+---
+ arch/arm/plat-omap/Makefile |    4 ++--
+ 1 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm/plat-omap/Makefile b/arch/arm/plat-omap/Makefile
+index 30db339..04c841c 100644
+--- a/arch/arm/plat-omap/Makefile
++++ b/arch/arm/plat-omap/Makefile
+@@ -13,8 +13,8 @@ obj-  :=
+ obj-$(CONFIG_ARCH_OMAP16XX) += ocpi.o
+ 
+ obj-$(CONFIG_OMAP_MCBSP) += mcbsp.o
+-#obj-$(CONFIG_ARCH_OMAP3) += omap-dss.o
+-#obj-$(CONFIG_VIDEO_OMAP_TVOUT) += omap-venc.o
++obj-$(CONFIG_ARCH_OMAP3) += omap-dss.o
++obj-$(CONFIG_VIDEO_OMAP_TVOUT) += omap-venc.o
+ obj-$(CONFIG_CPU_FREQ) += cpu-omap.o
+ obj-$(CONFIG_OMAP_DM_TIMER) += dmtimer.o
+ obj-$(CONFIG_OMAP_BOOT_REASON) += bootreason.o
+-- 
+1.5.6
+
