@@ -53,9 +53,10 @@ BEAGLEBOARD_EXTRA_INSTALL = "\
 #    task-base-extended \
     angstrom-led-config \ 
     powertop oprofile \
-    mplayer \
+    fbset \
     usbutils \
-#    synergy \
+    mplayer \
+    synergy \
 #    tar \
     "
 
