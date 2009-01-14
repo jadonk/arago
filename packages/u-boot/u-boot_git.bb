@@ -6,10 +6,10 @@ FILESDIR = "${@os.path.dirname(bb.data.getVar('FILE',d,1))}/u-boot-omap3-git/${M
 SRCREV = "${@bb.fetch.get_srcrev(d)}"
 
 PV = "${PR}+git${SRCREV}"
-PR ="r4"
+PR ="r5"
 
 #SRC_URI = "git://www.sakoman.net/git/u-boot-arm;branch=omap3-j24;protocol=git"
-SRC_URI = "git://gitorious.org/beagleboard-default-u-boot/jason-clone.git;branch=omap3dev-jdk;protocol=git"
+SRC_URI = "git://gitorious.org/beagleboard-default-u-boot/jason-clone.git;branch=jdk;protocol=git"
 
 UBOOT_MACHINE_beagleboard = "omap3_beagle_config"
 UBOOT_MACHINE_omap3evm = "omap3_evm_config"
