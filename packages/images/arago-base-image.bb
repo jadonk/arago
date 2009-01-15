@@ -13,7 +13,7 @@ ARAGO_ALSA = "\
     alsa-utils-alsamixer \
     alsa-utils-amixer \
     alsa-utils-aplay \
-    alsa-utils-iecset \
+#    alsa-utils-iecset \
 #    alsa-utils-midi \
     alsa-utils-speakertest \
     "
