@@ -18,12 +18,6 @@ ARAGO_ALSA = "\
     alsa-utils-speakertest \
     "
 
-ARAGO_TSLIB = "\
-    tslib-conf \
-    tslib-calibrate \
-    tslib-tests \
-    "
-
 # ncurses-terminfo is rarely needed and won't fit in 16MB
 ARAGO_NCURSES = "\
     ncurses \
@@ -34,19 +28,12 @@ ARAGO_NCURSES = "\
 # cppstub is needed to install libstdc++ in the image
 ARAGO_EXTRA_INSTALL = "\
     ${ARAGO_ALSA} \
-    ${ARAGO_TSLIB} \
     ${ARAGO_NCURSES} \
-    zlib \
-    libpng \
-    jpeg \
-    jpeg-tools \
-    freetype \
     mtd-utils \
-    thttpd \
-    gdbserver \
-    opkg-nogpg \
-    arago-feed-configs \
-    cppstub \
+    angstrom-led-config \
+    fbset \
+    usbutils \
+    mplayer \
     "
 
 # Disable this due to distribution restrictions
