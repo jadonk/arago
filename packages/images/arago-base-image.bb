@@ -14,7 +14,7 @@ ARAGO_ALSA = "\
     alsa-utils-amixer \
     alsa-utils-aplay \
     alsa-utils-iecset \
-    alsa-utils-midi \
+#    alsa-utils-midi \
     alsa-utils-speakertest \
     "
 
@@ -34,6 +34,13 @@ ARAGO_EXTRA_INSTALL = "\
     fbset \
     usbutils \
     mplayer \
+    i2c-tools \
+    e2fsprogs \
+    e2fsprogs-e2fsck \
+    e2fsprogs-mke2fs \
+    dosfstools \
+    util-linux-fdisk \
+    util-linux-sfdisk \
     "
 
 # Disable this due to distribution restrictions
