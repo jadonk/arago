@@ -34,25 +34,25 @@ ARAGO_NCURSES = "\
 # cppstub is needed to install libstdc++ in the image
 ARAGO_EXTRA_INSTALL = "\
     ${ARAGO_ALSA} \
-    ${ARAGO_TSLIB} \
+#    ${ARAGO_TSLIB} \
     ${ARAGO_NCURSES} \
-    zlib \
-    libpng \
-    jpeg \
-    jpeg-tools \
-    freetype \
+#    zlib \
+#    libpng \
+#    jpeg \
+#    jpeg-tools \
+#    freetype \
     mtd-utils \
-    thttpd \
-    gdbserver \
-    opkg-nogpg \
-    arago-feed-configs \
-    cppstub \
+#    thttpd \
+#    gdbserver \
+#    opkg-nogpg \
+#    arago-feed-configs \
+#    cppstub \
     "
 
 BEAGLEBOARD_EXTRA_INSTALL = "\
 #    task-base-extended \
     angstrom-led-config \ 
-    powertop oprofile \
+#    powertop oprofile \
     fbset \
     usbutils \
     mplayer \
