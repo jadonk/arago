@@ -56,8 +56,6 @@ BEAGLEBOARD_EXTRA_INSTALL = "\
     fbset \
     usbutils \
     mplayer \
-    synergy \
-#    tar \
     "
 
 # Disable this due to distribution restrictions
