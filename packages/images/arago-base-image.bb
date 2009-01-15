@@ -10,7 +10,7 @@ ARAGO_ALSA = "\
     alsa-utils-aconnect \
     alsa-utils-alsaconf \
     alsa-utils-alsactl \
-    alsa-utils-alsamixer \
+#    alsa-utils-alsamixer \
     alsa-utils-amixer \
     alsa-utils-aplay \
 #    alsa-utils-iecset \
