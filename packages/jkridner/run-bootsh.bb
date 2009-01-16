@@ -1,6 +1,6 @@
 DESCRIPTION = "Script to look for /media/mmcblk0p1/boot.sh"
 LICENSE = "BSD"
-HOMEPAGE = "http://www.beagleboard.org"
+HOMEPAGE = "http://beagleboard.org"
 
 inherit update-rc.d
 
@@ -11,8 +11,8 @@ SRC_URI += "\
     file://run_boot.sh \
     "
 
- do_install() {
-	install -d ${sysconfdir}/init.d
+do_install() {
+	install -d ${D}/${sysconfdir}/init.d
 	install -m 0755 ${WORKDIR}/run_boot.sh ${D}/${sysconfdir}/init.d/run_boot.sh
 }  
 
