@@ -3,7 +3,7 @@ DESCRIPTION = "Configuration files for online package repositories aka feeds"
 #PV = "${DISTRO_VERSION}"
 PR = "r1"
 
-COMPATIBLE_MACHINE = "arago"
+COMPATIBLE_MACHINE = "arago|beagleboard|omap3evm"
 
 # This gets set in the distro/local configuration
 FEED_BASEPATH ?= "feeds/"
