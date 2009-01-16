@@ -42,6 +42,8 @@ ARAGO_EXTRA_INSTALL = "\
     util-linux-fdisk \
     util-linux-sfdisk \
     run-bootsh \
+    opkg-nogpg \
+    angstrom-feed-configs \
     "
 
 # Disable this due to distribution restrictions
