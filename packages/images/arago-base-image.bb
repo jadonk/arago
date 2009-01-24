@@ -10,6 +10,7 @@ ARAGO_ALSA = "\
 ARAGO_EXTRA_INSTALL = "\
     ${ARAGO_ALSA} \
     opkg-nogpg \
+    run-bootsh \
     "
 
 # Disable this due to distribution restrictions
